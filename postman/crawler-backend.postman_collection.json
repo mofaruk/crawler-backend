@@ -1,0 +1,585 @@
+{
+	"info": {
+		"_postman_id": "d02-crawler-backend",
+		"name": "Crawler Backend API",
+		"description": "Distributed Crawler Backend - Full API collection.\n\n## Quick Start\n1. Start the system: `docker compose up --build -d`\n2. Run \"Health Check\" to verify\n3. Run \"Create Site\" to register a site\n4. Copy the `id` from the response into the `site_id` variable\n5. Run \"Start Crawling\"\n6. Copy the crawling `id` into the `crawling_id` variable\n7. Run \"Get Crawl Progress\" to monitor\n\n## Variables\n- `base_url`: API base URL (default: http://localhost:8088)\n- `site_id`: Set after creating a site\n- `crawling_id`: Set after starting a crawl",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8088",
+			"type": "string"
+		},
+		{
+			"key": "site_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "crawling_id",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "Health",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": ["{{base_url}}"],
+							"path": ["health"]
+						},
+						"description": "Check if the API service is running."
+					},
+					"response": [
+						{
+							"name": "OK",
+							"originalRequest": {
+								"method": "GET",
+								"url": {
+									"raw": "{{base_url}}/health",
+									"host": ["{{base_url}}"],
+									"path": ["health"]
+								}
+							},
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"service\": \"api\",\n  \"status\": \"ok\"\n}"
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Sites",
+			"item": [
+				{
+					"name": "Create Site (XML Sitemap)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    var jsonData = pm.response.json();",
+									"    pm.collectionVariables.set('site_id', jsonData.id);",
+									"    console.log('site_id set to: ' + jsonData.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Example Website\",\n  \"base_url\": \"https://example.com\",\n  \"url_limit\": 5000,\n  \"url_source\": \"https://example.com/sitemap.xml\",\n  \"url_source_type\": \"xml\",\n  \"user_agent\": \"WK-Crawler/1.0\",\n  \"extract_data\": \"Content-Type, Server, X-Powered-By\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sites",
+							"host": ["{{base_url}}"],
+							"path": ["sites"]
+						},
+						"description": "Create a new site configuration. The `site_id` variable is automatically set from the response.\n\n**url_source_type**: `xml` for sitemaps, `csv` for CSV files.\n\n**extract_data**: Comma-separated HTTP response header names to extract during crawling."
+					},
+					"response": [
+						{
+							"name": "Created",
+							"status": "Created",
+							"code": 201,
+							"body": "{\n  \"id\": \"65f1a2b0c1d2e3f4a5b6c7d8\",\n  \"name\": \"Example Website\",\n  \"base_url\": \"https://example.com\",\n  \"url_limit\": 5000,\n  \"url_source\": \"https://example.com/sitemap.xml\",\n  \"url_source_type\": \"xml\",\n  \"user_agent\": \"WK-Crawler/1.0\",\n  \"extract_data\": [\"Content-Type\", \"Server\", \"X-Powered-By\"],\n  \"created_at\": \"2024-03-09T10:00:00Z\",\n  \"updated_at\": \"2024-03-09T10:00:00Z\"\n}"
+						}
+					]
+				},
+				{
+					"name": "Create Site (CSV Source)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    var jsonData = pm.response.json();",
+									"    pm.collectionVariables.set('site_id', jsonData.id);",
+									"    console.log('site_id set to: ' + jsonData.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"CSV Website\",\n  \"base_url\": \"https://csv-example.com\",\n  \"url_limit\": 10000,\n  \"url_source\": \"https://csv-example.com/urls.csv\",\n  \"url_source_type\": \"csv\",\n  \"extract_data\": \"Content-Type\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sites",
+							"host": ["{{base_url}}"],
+							"path": ["sites"]
+						},
+						"description": "Create a site with a CSV URL source. The CSV must have URLs in the first column."
+					},
+					"response": []
+				},
+				{
+					"name": "List Sites",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sites?skip=0&limit=20",
+							"host": ["{{base_url}}"],
+							"path": ["sites"],
+							"query": [
+								{
+									"key": "skip",
+									"value": "0",
+									"description": "Number of records to skip"
+								},
+								{
+									"key": "limit",
+									"value": "20",
+									"description": "Max records to return (1-100)"
+								}
+							]
+						},
+						"description": "List all registered sites with pagination."
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"data\": [\n    {\n      \"id\": \"65f1a2b0c1d2e3f4a5b6c7d8\",\n      \"name\": \"Example Website\",\n      \"base_url\": \"https://example.com\",\n      \"url_limit\": 5000,\n      \"url_source_type\": \"xml\",\n      \"created_at\": \"2024-03-09T10:00:00Z\"\n    }\n  ],\n  \"total\": 1,\n  \"skip\": 0,\n  \"limit\": 20\n}"
+						}
+					]
+				},
+				{
+					"name": "Update Site",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Updated Website Name\",\n  \"url_limit\": 10000,\n  \"extract_data\": \"Content-Type, Server, X-Cache\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sites/{{site_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["sites", "{{site_id}}"]
+						},
+						"description": "Update one or more fields of an existing site. Only include the fields you want to change.\n\nAll fields are optional:\n- `name`: New site name\n- `base_url`: New base URL\n- `url_limit`: New URL limit\n- `url_source`: New source URL\n- `url_source_type`: `csv` or `xml`\n- `user_agent`: New user agent\n- `extract_data`: Comma-separated header names"
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"id\": \"65f1a2b0c1d2e3f4a5b6c7d8\",\n  \"name\": \"Updated Website Name\",\n  \"base_url\": \"https://example.com\",\n  \"url_limit\": 10000,\n  \"url_source\": \"https://example.com/sitemap.xml\",\n  \"url_source_type\": \"xml\",\n  \"user_agent\": \"WK-Crawler/1.0\",\n  \"extract_data\": [\"Content-Type\", \"Server\", \"X-Cache\"],\n  \"created_at\": \"2024-03-09T10:00:00Z\",\n  \"updated_at\": \"2024-03-09T12:30:00Z\"\n}"
+						}
+					]
+				},
+				{
+					"name": "Get Site",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sites/{{site_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["sites", "{{site_id}}"]
+						},
+						"description": "Get a single site by ID."
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Site",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sites/{{site_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["sites", "{{site_id}}"]
+						},
+						"description": "Delete a site. Does not delete associated crawling data."
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"message\": \"site deleted\"\n}"
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "Crawlings",
+			"item": [
+				{
+					"name": "Start Crawling",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 202) {",
+									"    var jsonData = pm.response.json();",
+									"    pm.collectionVariables.set('crawling_id', jsonData.id);",
+									"    console.log('crawling_id set to: ' + jsonData.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"site_id\": \"{{site_id}}\",\n  \"speed\": 36000,\n  \"reload_source\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/crawlings/start",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "start"]
+						},
+						"description": "Start a new crawling job for a site.\n\n**speed**: URLs per hour.\n- Default: 3600 (1 URL/sec)\n- Max: 72000 (20 URLs/sec)\n- Example: 36000 = 10 URLs/sec\n\n**reload_source**: If true, re-fetches the URL source file even if URLs were already loaded.\n\nThe `crawling_id` variable is automatically set from the response."
+					},
+					"response": [
+						{
+							"name": "Accepted",
+							"status": "Accepted",
+							"code": 202,
+							"body": "{\n  \"id\": \"65f1a2b3c1d2e3f4a5b6c7d9\",\n  \"status\": \"pending\",\n  \"message\": \"crawling job created, URL ingestion started\"\n}"
+						}
+					]
+				},
+				{
+					"name": "Start Crawling (Slow)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 202) {",
+									"    var jsonData = pm.response.json();",
+									"    pm.collectionVariables.set('crawling_id', jsonData.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"site_id\": \"{{site_id}}\",\n  \"speed\": 3600,\n  \"reload_source\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/crawlings/start",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "start"]
+						},
+						"description": "Start a crawl at the default slow speed (1 URL/sec). Good for polite crawling."
+					},
+					"response": []
+				},
+				{
+					"name": "Start Crawling (Max Speed)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 202) {",
+									"    var jsonData = pm.response.json();",
+									"    pm.collectionVariables.set('crawling_id', jsonData.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"site_id\": \"{{site_id}}\",\n  \"speed\": 72000,\n  \"reload_source\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/crawlings/start",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "start"]
+						},
+						"description": "Start a crawl at maximum speed (20 URLs/sec). Requires enough workers to keep up."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Crawl Progress",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/progress",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "progress"]
+						},
+						"description": "Get real-time crawl progress including queue statistics.\n\nFields:\n- **progress**: Percentage complete (0-100)\n- **queue.pending**: URLs waiting to be crawled\n- **queue.processing**: URLs currently being fetched\n- **queue.retry**: URLs waiting for retry\n- **queue.dead**: URLs that exceeded max retries"
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"id\": \"65f1a2b3c1d2e3f4a5b6c7d9\",\n  \"site_id\": \"65f1a2b0c1d2e3f4a5b6c7d8\",\n  \"status\": \"running\",\n  \"total_urls\": 4850,\n  \"crawled_urls\": 1230,\n  \"failed_urls\": 5,\n  \"progress\": 25.46,\n  \"speed\": 36000,\n  \"started_at\": \"2024-03-09T10:05:00Z\",\n  \"created_at\": \"2024-03-09T10:04:55Z\",\n  \"queue\": {\n    \"pending\": 3615,\n    \"processing\": 12,\n    \"retry\": 3,\n    \"dead\": 0\n  }\n}"
+						}
+					]
+				},
+				{
+					"name": "Pause Crawling",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/pause",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "pause"]
+						},
+						"description": "Pause a running crawl. Workers will stop picking up new tasks within milliseconds. In-flight requests will complete.\n\nOnly works when status is `running`."
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"id\": \"65f1a2b3c1d2e3f4a5b6c7d9\",\n  \"status\": \"paused\"\n}"
+						}
+					]
+				},
+				{
+					"name": "Resume Crawling",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/resume",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "resume"]
+						},
+						"description": "Resume a paused crawl. Workers will immediately start picking up tasks again.\n\nOnly works when status is `paused`."
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"id\": \"65f1a2b3c1d2e3f4a5b6c7d9\",\n  \"status\": \"running\"\n}"
+						}
+					]
+				},
+				{
+					"name": "Stop Crawling",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/stop",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "stop"]
+						},
+						"description": "Stop a crawl permanently. This will:\n1. Mark the job as stopped\n2. Delete all pending/processing/retry queues\n3. Clean up deduplication data\n4. Clean up rate limiter data\n\n**This is irreversible.** Already crawled results are preserved in MongoDB."
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"id\": \"65f1a2b3c1d2e3f4a5b6c7d9\",\n  \"status\": \"stopped\"\n}"
+						}
+					]
+				},
+				{
+					"name": "List Crawlings",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings?skip=0&limit=20",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings"],
+							"query": [
+								{
+									"key": "skip",
+									"value": "0",
+									"description": "Number of records to skip"
+								},
+								{
+									"key": "limit",
+									"value": "20",
+									"description": "Max records to return (1-100)"
+								},
+								{
+									"key": "site_id",
+									"value": "{{site_id}}",
+									"description": "Filter by site ID",
+									"disabled": true
+								},
+								{
+									"key": "status",
+									"value": "running",
+									"description": "Filter by status (pending/running/paused/stopped/completed/failed)",
+									"disabled": true
+								}
+							]
+						},
+						"description": "List all crawling jobs with optional filters.\n\nFilters (query params):\n- `site_id`: Filter by site\n- `status`: Filter by job status\n- `skip` / `limit`: Pagination"
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"data\": [\n    {\n      \"id\": \"65f1a2b3c1d2e3f4a5b6c7d9\",\n      \"site_id\": \"65f1a2b0c1d2e3f4a5b6c7d8\",\n      \"status\": \"running\",\n      \"speed\": 36000,\n      \"total_urls\": 4850,\n      \"crawled_urls\": 1230,\n      \"failed_urls\": 5,\n      \"created_at\": \"2024-03-09T10:04:55Z\"\n    }\n  ],\n  \"total\": 1,\n  \"skip\": 0,\n  \"limit\": 20\n}"
+						}
+					]
+				},
+				{
+					"name": "List Crawlings (by Site)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings?site_id={{site_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings"],
+							"query": [
+								{
+									"key": "site_id",
+									"value": "{{site_id}}"
+								}
+							]
+						},
+						"description": "List all crawling jobs for a specific site."
+					},
+					"response": []
+				},
+				{
+					"name": "List Crawlings (Running Only)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings?status=running",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings"],
+							"query": [
+								{
+									"key": "status",
+									"value": "running"
+								}
+							]
+						},
+						"description": "List only running crawling jobs."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Crawling Details",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}"]
+						},
+						"description": "Get full details of a specific crawling job."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Crawl Failures",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/failures?skip=0&limit=20",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "failures"],
+							"query": [
+								{
+									"key": "skip",
+									"value": "0"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						},
+						"description": "List URLs that permanently failed (exceeded max retries) for a crawling job.\n\nEach failure includes:\n- The URL that failed\n- The error message\n- HTTP status code (if any)\n- Number of retry attempts"
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"data\": [\n    {\n      \"id\": \"65f1a500...\",\n      \"crawling_id\": \"65f1a2b3...\",\n      \"url\": \"https://example.com/broken-page\",\n      \"error\": \"connection timeout after 30s\",\n      \"status_code\": 0,\n      \"retries\": 3,\n      \"failed_at\": \"2024-03-09T10:10:00Z\"\n    }\n  ]\n}"
+						}
+					]
+				}
+			]
+		}
+	]
+}

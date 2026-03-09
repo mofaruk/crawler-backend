@@ -1,0 +1,146 @@
+services:
+  # --- API Service ---
+  crawler_api:
+    build:
+      context: .
+      target: api
+    ports:
+      - "${CRAWLER_API_PORT:-8088}:8080"
+      - "${CRAWLER_METRICS_PORT:-9098}:9090"
+    environment:
+      - SERVICE_NAME=crawler-backend
+      - SERVICE_ROLE=api
+      - API_PORT=8080
+      - METRICS_PORT=9090
+      - MONGO_URI=mongodb://crawler_mongodb:27017
+      - MONGO_DB=crawler
+      - REDIS_ADDR=crawler_redis:6379
+      - LOG_LEVEL=info
+      - CRAWLER_MAX_RETRIES=3
+      - DEFAULT_USER_AGENT=WK-Crawler/1.0
+    depends_on:
+      crawler_redis:
+        condition: service_healthy
+      crawler_mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - crawler-net
+
+  # --- Worker Service (scalable) ---
+  crawler_worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      - SERVICE_NAME=crawler-backend
+      - SERVICE_ROLE=worker
+      - METRICS_PORT=9090
+      - MONGO_URI=mongodb://crawler_mongodb:27017
+      - MONGO_DB=crawler
+      - REDIS_ADDR=crawler_redis:6379
+      - WORKER_CONCURRENCY=200
+      - WORKER_POLL_INTERVAL=100ms
+      - WORKER_BATCH_SIZE=50
+      - CRAWLER_TIMEOUT=30s
+      - CRAWLER_MAX_RETRIES=3
+      - DEFAULT_USER_AGENT=WK-Crawler/1.0
+      - LOG_LEVEL=info
+    depends_on:
+      crawler_redis:
+        condition: service_healthy
+      crawler_mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 128M
+    networks:
+      - crawler-net
+
+  # --- Redis ---
+  crawler_redis:
+    image: redis:7-alpine
+    ports:
+      - "${CRAWLER_REDIS_PORT:-6382}:6379"
+    command: >
+      redis-server
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - crawler-net
+
+  # --- MongoDB ---
+  crawler_mongodb:
+    image: mongo:7
+    ports:
+      - "${CRAWLER_MONGO_PORT:-27020}:27017"
+    command: ["mongod", "--wiredTigerCacheSizeGB", "1"]
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - crawler-net
+
+  # --- Prometheus ---
+  crawler_prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "${CRAWLER_PROMETHEUS_PORT:-9095}:9090"
+    volumes:
+      - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    restart: unless-stopped
+    networks:
+      - crawler-net
+
+  # --- Grafana ---
+  crawler_grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "${CRAWLER_GRAFANA_PORT:-3030}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
+    restart: unless-stopped
+    networks:
+      - crawler-net
+
+volumes:
+  redis-data:
+  mongo-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  crawler-net:
+    driver: bridge

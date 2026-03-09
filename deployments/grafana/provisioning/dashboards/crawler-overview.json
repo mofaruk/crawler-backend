@@ -1,0 +1,104 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "crawler-overview",
+    "title": "Crawler Overview",
+    "tags": ["crawler"],
+    "timezone": "browser",
+    "refresh": "10s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "URLs Crawled Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(crawler_urls_crawled_total[1m])) by (status)",
+            "legendFormat": "{{status}}"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Active Workers",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(crawler_workers_active)",
+            "legendFormat": "Active"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Active Crawlings",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "expr": "crawler_active_crawlings",
+            "legendFormat": "Jobs"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Fetch Latency (p99)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(crawler_url_fetch_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "p99"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(crawler_url_fetch_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "p50"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Queue Backlog",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "sum(crawler_queue_pending) by (crawling_id)",
+            "legendFormat": "Pending {{crawling_id}}"
+          },
+          {
+            "expr": "sum(crawler_queue_processing) by (crawling_id)",
+            "legendFormat": "Processing {{crawling_id}}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Error Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "sum(rate(crawler_errors_total[5m])) by (error_type)",
+            "legendFormat": "{{error_type}}"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "HTTP Status Codes",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "sum(rate(crawler_http_status_codes_total[5m])) by (code)",
+            "legendFormat": "{{code}}"
+          }
+        ]
+      }
+    ]
+  }
+}
