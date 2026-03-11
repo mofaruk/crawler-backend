@@ -105,11 +105,11 @@ services:
 
   # --- Prometheus ---
   crawler_prometheus:
-    image: prom/prometheus:v2.51.0
+    build:
+      context: ./deployments/prometheus
     ports:
       - "${CRAWLER_PROMETHEUS_PORT:-9095}:9090"
     volumes:
-      - ./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -120,7 +120,8 @@ services:
 
   # --- Grafana ---
   crawler_grafana:
-    image: grafana/grafana:10.4.0
+    build:
+      context: ./deployments/grafana
     ports:
       - "${CRAWLER_GRAFANA_PORT:-3030}:3000"
     environment:
@@ -129,7 +130,6 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
     restart: unless-stopped
     networks:
       - crawler-net
