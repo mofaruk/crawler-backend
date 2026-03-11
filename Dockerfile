@@ -5,12 +5,9 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /app
 
-# Cache Go modules (only re-downloaded when go.mod/go.sum change)
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source
+# Copy source and resolve dependencies
 COPY . .
+RUN go mod tidy
 
 # Build both binaries
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
