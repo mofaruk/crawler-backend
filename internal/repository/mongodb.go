@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -322,6 +323,74 @@ func (r *MongoRepository) BulkInsertResults(ctx context.Context, results []model
 	}
 	_, err := r.crawlingResults().InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
 	return err
+}
+
+// --- Result Query Operations ---
+
+func (r *MongoRepository) GetHeaderAnalytics(ctx context.Context, crawlingID primitive.ObjectID, headerName string) ([]models.HeaderValueCount, int64, error) {
+	fieldPath := "headers." + headerName
+
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"crawling_id": crawlingID,
+			fieldPath:     bson.M{"$exists": true, "$ne": nil},
+		}}},
+		{{Key: "$group", Value: bson.M{
+			"_id":   "$" + fieldPath,
+			"count": bson.M{"$sum": 1},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "count", Value: -1}}}},
+	}
+
+	cursor, err := r.crawlingResults().Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var results []models.HeaderValueCount
+	var total int64
+	for cursor.Next(ctx) {
+		var doc struct {
+			Value interface{} `bson:"_id"`
+			Count int64       `bson:"count"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+		value := ""
+		if doc.Value != nil {
+			value = fmt.Sprintf("%v", doc.Value)
+		}
+		results = append(results, models.HeaderValueCount{
+			Value: value,
+			Count: doc.Count,
+		})
+		total += doc.Count
+	}
+	return results, total, nil
+}
+
+func (r *MongoRepository) GetCrawlingResults(ctx context.Context, crawlingID primitive.ObjectID, filter bson.M, skip, limit int64) ([]models.CrawlingResult, int64, error) {
+	filter["crawling_id"] = crawlingID
+
+	total, err := r.crawlingResults().CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	opts := options.Find().SetSkip(skip).SetLimit(limit).SetSort(bson.D{{Key: "crawled_at", Value: -1}})
+	cursor, err := r.crawlingResults().Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var results []models.CrawlingResult
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, 0, err
+	}
+	return results, total, nil
 }
 
 // --- Failure Operations ---

@@ -578,6 +578,117 @@
 							"body": "{\n  \"data\": [\n    {\n      \"id\": \"65f1a500...\",\n      \"crawling_id\": \"65f1a2b3...\",\n      \"url\": \"https://example.com/broken-page\",\n      \"error\": \"connection timeout after 30s\",\n      \"status_code\": 0,\n      \"retries\": 3,\n      \"failed_at\": \"2024-03-09T10:10:00Z\"\n    }\n  ]\n}"
 						}
 					]
+				},
+				{
+					"name": "Get Header Analytics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/results/analytics?header=cf-cache-status",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "results", "analytics"],
+							"query": [
+								{
+									"key": "header",
+									"value": "cf-cache-status",
+									"description": "HTTP header name to analyze (must match an extract_data header configured on the site)"
+								}
+							]
+						},
+						"description": "Get analytics for a specific HTTP response header across all crawled URLs.\n\nReturns the count of each distinct value for the given header.\n\n**header** (required): The header name to analyze, e.g. `cf-cache-status`, `content-type`, `server`.\n\nThe header must be one that was configured in the site's `extract_data` field."
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"header\": \"cf-cache-status\",\n  \"total\": 1500,\n  \"values\": [\n    { \"value\": \"HIT\", \"count\": 800 },\n    { \"value\": \"MISS\", \"count\": 400 },\n    { \"value\": \"DYNAMIC\", \"count\": 200 },\n    { \"value\": \"BYPASS\", \"count\": 100 }\n  ]\n}"
+						}
+					]
+				},
+				{
+					"name": "Get Crawling Results",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/results?skip=0&limit=20",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "results"],
+							"query": [
+								{
+									"key": "skip",
+									"value": "0",
+									"description": "Number of records to skip"
+								},
+								{
+									"key": "limit",
+									"value": "20",
+									"description": "Max records to return (1-100)"
+								},
+								{
+									"key": "header",
+									"value": "cf-cache-status",
+									"description": "Filter by header name",
+									"disabled": true
+								},
+								{
+									"key": "value",
+									"value": "MISS",
+									"description": "Filter by header value (requires header param)",
+									"disabled": true
+								},
+								{
+									"key": "status_code",
+									"value": "200",
+									"description": "Filter by HTTP status code",
+									"disabled": true
+								}
+							]
+						},
+						"description": "List crawling results with pagination and optional filters.\n\n**Filters:**\n- `header` + `value`: Filter by a specific header value, e.g. `header=cf-cache-status&value=MISS`\n- `header` (without value): Filter to results that have the specified header\n- `status_code`: Filter by HTTP status code\n- `skip` / `limit`: Pagination (max 100 per page)"
+					},
+					"response": [
+						{
+							"name": "OK",
+							"status": "OK",
+							"code": 200,
+							"body": "{\n  \"data\": [\n    {\n      \"id\": \"65f1a600...\",\n      \"crawling_id\": \"65f1a2b3...\",\n      \"site_id\": \"65f1a2b0...\",\n      \"url\": \"https://example.com/page-1\",\n      \"status_code\": 200,\n      \"headers\": { \"cf-cache-status\": \"MISS\" },\n      \"body_data\": null,\n      \"content_type\": \"text/html; charset=UTF-8\",\n      \"response_time_ms\": 2142,\n      \"crawled_at\": \"2024-03-09T10:08:00Z\"\n    }\n  ],\n  \"total\": 400,\n  \"skip\": 0,\n  \"limit\": 20\n}"
+						}
+					]
+				},
+				{
+					"name": "Get Crawling Results (by Header Value)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/crawlings/{{crawling_id}}/results?header=cf-cache-status&value=MISS&skip=0&limit=20",
+							"host": ["{{base_url}}"],
+							"path": ["crawlings", "{{crawling_id}}", "results"],
+							"query": [
+								{
+									"key": "header",
+									"value": "cf-cache-status"
+								},
+								{
+									"key": "value",
+									"value": "MISS"
+								},
+								{
+									"key": "skip",
+									"value": "0"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						},
+						"description": "List crawling results filtered by a specific header value. For example, get all URLs where `cf-cache-status` is `MISS`.\n\nReturns the URL, headers, status code, response time, and crawled_at timestamp."
+					},
+					"response": []
 				}
 			]
 		}

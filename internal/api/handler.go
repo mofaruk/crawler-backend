@@ -570,6 +570,75 @@ func (h *Handler) GetCrawlingFailures(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": failures})
 }
 
+// --- Crawling Results ---
+
+// GET /crawlings/:id/results/analytics?header=cf-cache-status
+func (h *Handler) GetHeaderAnalytics(c *gin.Context) {
+	oid, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid crawling ID", Code: "INVALID_ID"})
+		return
+	}
+
+	headerName := c.Query("header")
+	if headerName == "" {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "header query parameter is required", Code: "INVALID_REQUEST"})
+		return
+	}
+
+	values, total, err := h.repo.GetHeaderAnalytics(c.Request.Context(), oid, headerName)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get header analytics")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get header analytics"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"header": headerName,
+		"total":  total,
+		"values": values,
+	})
+}
+
+// GET /crawlings/:id/results?header=cf-cache-status&value=MISS&skip=0&limit=20
+func (h *Handler) GetCrawlingResults(c *gin.Context) {
+	oid, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid crawling ID", Code: "INVALID_ID"})
+		return
+	}
+
+	skip, limit := parsePagination(c)
+
+	filter := bson.M{}
+	if headerName := c.Query("header"); headerName != "" {
+		if headerValue := c.Query("value"); headerValue != "" {
+			filter["headers."+headerName] = headerValue
+		} else {
+			filter["headers."+headerName] = bson.M{"$exists": true}
+		}
+	}
+	if statusCode := c.Query("status_code"); statusCode != "" {
+		if code, err := strconv.Atoi(statusCode); err == nil {
+			filter["status_code"] = code
+		}
+	}
+
+	results, total, err := h.repo.GetCrawlingResults(c.Request.Context(), oid, filter, skip, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get crawling results")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get crawling results"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":  results,
+		"total": total,
+		"skip":  skip,
+		"limit": limit,
+	})
+}
+
 // --- Health ---
 
 func (h *Handler) Health(c *gin.Context) {

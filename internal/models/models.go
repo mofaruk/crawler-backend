@@ -163,3 +163,8 @@ type ErrorResponse struct {
 	Error   string `json:"error"`
 	Code    string `json:"code,omitempty"`
 }
+
+type HeaderValueCount struct {
+	Value string `json:"value"`
+	Count int64  `json:"count"`
+}
