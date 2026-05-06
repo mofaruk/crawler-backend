@@ -5,15 +5,18 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
+	"github.com/webkonsulenterne/crawler-backend/internal/discovery"
 	"github.com/webkonsulenterne/crawler-backend/internal/metrics"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
 	"github.com/webkonsulenterne/crawler-backend/internal/queue"
@@ -58,6 +61,15 @@ func (h *Handler) CreateSite(c *gin.Context) {
 	var req models.CreateSiteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error(), Code: "INVALID_REQUEST"})
+		return
+	}
+
+	// url_source is required for csv/xml; for auto it is unused.
+	if req.URLSourceType != models.URLSourceTypeAuto && strings.TrimSpace(req.URLSource) == "" {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "url_source is required when url_source_type is 'csv' or 'xml'",
+			Code:  "INVALID_REQUEST",
+		})
 		return
 	}
 
@@ -279,16 +291,23 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 	})
 }
 
-// ingestURLs fetches the URL source and pushes URLs into the queue.
+// ingestURLs fetches the URL source and pushes URLs into the queue. For
+// "auto" sites it delegates to ingestAutoDiscovery; otherwise it parses the
+// CSV/XML source upfront.
 func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *models.Crawling) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
 	logger := log.With().Str("crawling_id", crawlingID).Logger()
-
 	oid, _ := primitive.ObjectIDFromHex(crawlingID)
 
-	// Fetch and parse URLs
+	if site.URLSourceType == models.URLSourceTypeAuto {
+		h.ingestAutoDiscovery(ctx, logger, crawlingID, oid, site, crawling)
+		return
+	}
+
+	// --- Static-source (CSV / XML) path ---
+
 	logger.Info().Str("source", site.URLSource).Msg("fetching URL source")
 	urls, err := h.parser.ParseURLs(ctx, site.URLSource, site.URLSourceType, site.URLLimit)
 	if err != nil {
@@ -305,17 +324,14 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 
 	logger.Info().Int("url_count", len(urls)).Msg("URLs parsed from source")
 
-	// Set total URLs
 	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, len(urls))
 
-	// Initialize rate limiter
 	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
 		logger.Error().Err(err).Msg("failed to init rate limiter")
 		_ = h.repo.SetCrawlingError(ctx, oid, "failed to init rate limiter")
 		return
 	}
 
-	// Deduplicate and enqueue in batches
 	batchSize := 1000
 	totalEnqueued := 0
 
@@ -324,22 +340,18 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		if end > len(urls) {
 			end = len(urls)
 		}
-		batch := urls[i:end]
 
 		var tasks []models.CrawlTask
-		for _, u := range batch {
+		for _, u := range urls[i:end] {
 			urlHash := dedup.HashURL(u)
-
-			// Check dedup
 			isNew, err := h.dedup.MarkSeen(ctx, crawlingID, urlHash)
 			if err != nil {
 				logger.Error().Err(err).Str("url", u).Msg("dedup check failed")
 				continue
 			}
 			if !isNew {
-				continue // duplicate
+				continue
 			}
-
 			tasks = append(tasks, models.CrawlTask{
 				CrawlingID:  crawlingID,
 				SiteID:      site.ID.Hex(),
@@ -364,12 +376,130 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 
 	logger.Info().Int("enqueued", totalEnqueued).Msg("URL ingestion complete")
 
-	// Mark job as running
 	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusRunning)
 	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusRunning)
 	_ = h.stateManager.AddActiveCrawling(ctx, crawlingID)
 
 	metrics.ActiveCrawlingsGauge.Inc()
+}
+
+// ingestAutoDiscovery walks the site BFS-style starting from base_url,
+// emitting page and static-asset URLs into the queue as they are found.
+//
+// The crawl is set to "running" in Redis (so workers fetch immediately) and
+// "discovering" in the DB so the UI can show the right state. Once discovery
+// finishes the DB status flips to "running".
+func (h *Handler) ingestAutoDiscovery(
+	ctx context.Context,
+	logger zerolog.Logger,
+	crawlingID string,
+	oid primitive.ObjectID,
+	site *models.Site,
+	crawling *models.Crawling,
+) {
+	logger.Info().Str("base_url", site.BaseURL).Int("limit", site.URLLimit).Msg("starting auto discovery")
+
+	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
+		logger.Error().Err(err).Msg("failed to init rate limiter")
+		_ = h.repo.SetCrawlingError(ctx, oid, "failed to init rate limiter")
+		return
+	}
+
+	// Workers need to start crawling as soon as the first URL hits the queue.
+	// The discovering flag stops the worker pool from declaring completion on
+	// transient empty-queue states between discovery batches.
+	_ = h.stateManager.SetDiscovering(ctx, crawlingID)
+	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusDiscovering)
+	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusRunning)
+	_ = h.stateManager.AddActiveCrawling(ctx, crawlingID)
+	metrics.ActiveCrawlingsGauge.Inc()
+
+	const flushBatch = 100
+	var (
+		bufMu         sync.Mutex
+		buffer        = make([]models.CrawlTask, 0, flushBatch)
+		totalEnqueued int
+	)
+
+	flush := func() {
+		bufMu.Lock()
+		if len(buffer) == 0 {
+			bufMu.Unlock()
+			return
+		}
+		batch := buffer
+		buffer = make([]models.CrawlTask, 0, flushBatch)
+		bufMu.Unlock()
+
+		if err := h.queue.EnqueueBatch(ctx, crawlingID, batch); err != nil {
+			logger.Error().Err(err).Int("batch", len(batch)).Msg("failed to enqueue discovered batch")
+			return
+		}
+		if err := h.repo.IncCrawlingTotalURLs(ctx, oid, len(batch)); err != nil {
+			logger.Warn().Err(err).Msg("failed to increment total_urls during discovery")
+		}
+		totalEnqueued += len(batch)
+	}
+
+	emit := func(rawURL string) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		urlHash := dedup.HashURL(rawURL)
+		isNew, err := h.dedup.MarkSeen(ctx, crawlingID, urlHash)
+		if err != nil {
+			logger.Error().Err(err).Str("url", rawURL).Msg("dedup check failed during discovery")
+			return true
+		}
+		if !isNew {
+			return true
+		}
+
+		bufMu.Lock()
+		buffer = append(buffer, models.CrawlTask{
+			CrawlingID:  crawlingID,
+			SiteID:      site.ID.Hex(),
+			URL:         rawURL,
+			URLHash:     urlHash,
+			UserAgent:   site.UserAgent,
+			ExtractData: site.ExtractData,
+			Retries:     0,
+			MaxRetries:  h.cfg.CrawlerMaxRetries,
+			EnqueuedAt:  time.Now().Unix(),
+		})
+		shouldFlush := len(buffer) >= flushBatch
+		bufMu.Unlock()
+
+		if shouldFlush {
+			flush()
+		}
+		return true
+	}
+
+	d := discovery.New(site.UserAgent)
+	if err := d.Discover(ctx, site.BaseURL, site.URLLimit, emit); err != nil {
+		logger.Error().Err(err).Msg("auto discovery failed")
+		flush() // emit whatever we found before the error
+		_ = h.repo.SetCrawlingError(ctx, oid, "auto discovery failed: "+err.Error())
+		return
+	}
+
+	flush()
+
+	// Discovery is done; clear the flag before any further state change so the
+	// worker pool can declare completion once the queue drains.
+	_ = h.stateManager.ClearDiscovering(ctx, crawlingID)
+
+	if totalEnqueued == 0 {
+		logger.Warn().Msg("auto discovery found no URLs")
+		_ = h.repo.SetCrawlingError(ctx, oid, "auto discovery found no URLs at base_url")
+		return
+	}
+
+	logger.Info().Int("enqueued", totalEnqueued).Msg("auto discovery complete")
+
+	// Flip DB status to running for the rest of the crawl.
+	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusRunning)
 }
 
 // POST /crawlings/:id/pause
@@ -445,6 +575,7 @@ func (h *Handler) StopCrawling(c *gin.Context) {
 	}
 
 	_ = h.stateManager.SetState(c.Request.Context(), crawlingID, models.CrawlStatusStopped)
+	_ = h.stateManager.ClearDiscovering(c.Request.Context(), crawlingID)
 	_ = h.stateManager.RemoveActiveCrawling(c.Request.Context(), crawlingID)
 	_ = h.repo.UpdateCrawlingStatus(c.Request.Context(), oid, models.CrawlStatusStopped)
 	_ = h.queue.DeleteQueue(c.Request.Context(), crawlingID)
@@ -479,6 +610,9 @@ func (h *Handler) GetCrawlingProgress(c *gin.Context) {
 	// Get queue stats for real-time view
 	queueStats, _ := h.queue.GetStats(c.Request.Context(), crawlingID)
 
+	// Discovery flag — total_urls is still rising while this is true.
+	discovering, _ := h.stateManager.IsDiscovering(c.Request.Context(), crawlingID)
+
 	resp := gin.H{
 		"id":           crawlingID,
 		"site_id":      crawling.SiteID.Hex(),
@@ -490,6 +624,7 @@ func (h *Handler) GetCrawlingProgress(c *gin.Context) {
 		"speed":        crawling.Speed,
 		"started_at":   crawling.StartedAt,
 		"created_at":   crawling.CreatedAt,
+		"discovering":  discovering,
 	}
 
 	if queueStats != nil {

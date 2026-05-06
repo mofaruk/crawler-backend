@@ -45,6 +45,36 @@ func (m *JobStateManager) DeleteState(ctx context.Context, crawlingID string) er
 	return m.rdb.Del(ctx, stateKey(crawlingID)).Err()
 }
 
+// Discovery flag: set while auto-discovery is still streaming URLs into the
+// queue. Workers consult this to avoid prematurely declaring the job complete
+// during a transient empty queue between discovery batches.
+//
+// Redis key:
+//   crawl:{crawling_id}:discovering - STRING "1" while discovery is in progress
+
+func discoveringKey(crawlingID string) string {
+	return fmt.Sprintf("crawl:%s:discovering", crawlingID)
+}
+
+func (m *JobStateManager) SetDiscovering(ctx context.Context, crawlingID string) error {
+	return m.rdb.Set(ctx, discoveringKey(crawlingID), "1", 0).Err()
+}
+
+func (m *JobStateManager) ClearDiscovering(ctx context.Context, crawlingID string) error {
+	return m.rdb.Del(ctx, discoveringKey(crawlingID)).Err()
+}
+
+func (m *JobStateManager) IsDiscovering(ctx context.Context, crawlingID string) (bool, error) {
+	res, err := m.rdb.Get(ctx, discoveringKey(crawlingID)).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return res == "1", nil
+}
+
 // ActiveCrawlings tracks which crawling jobs are currently active.
 //
 // Redis key:

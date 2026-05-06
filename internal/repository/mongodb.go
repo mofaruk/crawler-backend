@@ -206,8 +206,14 @@ func (r *MongoRepository) UpdateCrawlingStatus(ctx context.Context, id primitive
 
 	now := time.Now()
 	switch status {
-	case models.CrawlStatusRunning:
-		update["$set"].(bson.M)["started_at"] = now
+	case models.CrawlStatusDiscovering, models.CrawlStatusRunning:
+		// Stamp started_at on the first transition out of pending. Use $setOnInsert
+		// semantics via a separate update to avoid overwriting the original time
+		// when status flips discovering → running mid-crawl.
+		_, _ = r.crawlings().UpdateOne(ctx,
+			bson.M{"_id": id, "started_at": bson.M{"$exists": false}},
+			bson.M{"$set": bson.M{"started_at": now}},
+		)
 	case models.CrawlStatusCompleted, models.CrawlStatusFailed, models.CrawlStatusStopped:
 		update["$set"].(bson.M)["completed_at"] = now
 	case models.CrawlStatusPaused:
@@ -235,6 +241,19 @@ func (r *MongoRepository) SetCrawlingTotalURLs(ctx context.Context, id primitive
 			"total_urls":  total,
 			"updated_at":  time.Now(),
 		},
+	})
+	return err
+}
+
+// IncCrawlingTotalURLs atomically increases total_urls by delta. Used during
+// streaming auto-discovery, where the final URL count is unknown upfront.
+func (r *MongoRepository) IncCrawlingTotalURLs(ctx context.Context, id primitive.ObjectID, delta int) error {
+	if delta == 0 {
+		return nil
+	}
+	_, err := r.crawlings().UpdateByID(ctx, id, bson.M{
+		"$inc": bson.M{"total_urls": delta},
+		"$set": bson.M{"updated_at": time.Now()},
 	})
 	return err
 }

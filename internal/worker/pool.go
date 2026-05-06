@@ -266,22 +266,28 @@ func (p *Pool) checkJobCompletion(ctx context.Context, crawlingID string) {
 	if err != nil {
 		return
 	}
-
-	if remaining == 0 {
-		state, err := p.stateManager.GetState(ctx, crawlingID)
-		if err != nil || state != models.CrawlStatusRunning {
-			return
-		}
-
-		log.Info().Str("crawling_id", crawlingID).Msg("crawling job completed")
-
-		// Mark as completed
-		_ = p.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
-		_ = p.stateManager.RemoveActiveCrawling(ctx, crawlingID)
-		_ = p.repo.UpdateCrawlingStatus(ctx, mustObjectID(crawlingID), models.CrawlStatusCompleted)
-
-		metrics.ActiveCrawlingsGauge.Dec()
+	if remaining != 0 {
+		return
 	}
+
+	// Auto-discovery streams URLs in over time; an empty queue mid-discovery
+	// is not a finished job.
+	if discovering, err := p.stateManager.IsDiscovering(ctx, crawlingID); err == nil && discovering {
+		return
+	}
+
+	state, err := p.stateManager.GetState(ctx, crawlingID)
+	if err != nil || state != models.CrawlStatusRunning {
+		return
+	}
+
+	log.Info().Str("crawling_id", crawlingID).Msg("crawling job completed")
+
+	_ = p.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
+	_ = p.stateManager.RemoveActiveCrawling(ctx, crawlingID)
+	_ = p.repo.UpdateCrawlingStatus(ctx, mustObjectID(crawlingID), models.CrawlStatusCompleted)
+
+	metrics.ActiveCrawlingsGauge.Dec()
 }
 
 // recoveryLoop periodically requeues stale processing tasks and retry tasks.

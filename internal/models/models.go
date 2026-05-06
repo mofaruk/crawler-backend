@@ -11,12 +11,20 @@ import (
 type CrawlStatus string
 
 const (
-	CrawlStatusPending   CrawlStatus = "pending"
-	CrawlStatusRunning   CrawlStatus = "running"
-	CrawlStatusPaused    CrawlStatus = "paused"
-	CrawlStatusStopped   CrawlStatus = "stopped"
-	CrawlStatusCompleted CrawlStatus = "completed"
-	CrawlStatusFailed    CrawlStatus = "failed"
+	CrawlStatusPending     CrawlStatus = "pending"
+	CrawlStatusDiscovering CrawlStatus = "discovering"
+	CrawlStatusRunning     CrawlStatus = "running"
+	CrawlStatusPaused      CrawlStatus = "paused"
+	CrawlStatusStopped     CrawlStatus = "stopped"
+	CrawlStatusCompleted   CrawlStatus = "completed"
+	CrawlStatusFailed      CrawlStatus = "failed"
+)
+
+// URL source types for a Site.
+const (
+	URLSourceTypeCSV  = "csv"
+	URLSourceTypeXML  = "xml"
+	URLSourceTypeAuto = "auto" // auto-discover by crawling base_url
 )
 
 // --- Site ---
@@ -125,8 +133,8 @@ type CreateSiteRequest struct {
 	Name          string `json:"name" binding:"required"`
 	BaseURL       string `json:"base_url" binding:"required,url"`
 	URLLimit      int    `json:"url_limit" binding:"required,min=1"`
-	URLSource     string `json:"url_source" binding:"required,url"`
-	URLSourceType string `json:"url_source_type" binding:"required,oneof=csv xml"`
+	URLSource     string `json:"url_source" binding:"omitempty,url"` // required unless url_source_type is "auto"
+	URLSourceType string `json:"url_source_type" binding:"required,oneof=csv xml auto"`
 	UserAgent     string `json:"user_agent"`
 	ExtractData   string `json:"extract_data"` // comma-separated header names
 }
@@ -136,7 +144,7 @@ type UpdateSiteRequest struct {
 	BaseURL       *string `json:"base_url" binding:"omitempty,url"`
 	URLLimit      *int    `json:"url_limit" binding:"omitempty,min=1"`
 	URLSource     *string `json:"url_source" binding:"omitempty,url"`
-	URLSourceType *string `json:"url_source_type" binding:"omitempty,oneof=csv xml"`
+	URLSourceType *string `json:"url_source_type" binding:"omitempty,oneof=csv xml auto"`
 	UserAgent     *string `json:"user_agent"`
 	ExtractData   *string `json:"extract_data"`
 }
