@@ -412,6 +412,78 @@ func (r *MongoRepository) GetCrawlingResults(ctx context.Context, crawlingID pri
 	return results, total, nil
 }
 
+// ListCrawlingResultsByCursor returns results sorted by _id descending. If
+// cursor is non-zero, only returns documents with _id < cursor. Returns at
+// most limit results plus a hasMore flag (the caller is responsible for using
+// the last result's ID as the next cursor).
+func (r *MongoRepository) ListCrawlingResultsByCursor(
+	ctx context.Context,
+	crawlingID primitive.ObjectID,
+	filter bson.M,
+	cursor primitive.ObjectID,
+	limit int64,
+) ([]models.CrawlingResult, bool, error) {
+	filter["crawling_id"] = crawlingID
+	if !cursor.IsZero() {
+		filter["_id"] = bson.M{"$lt": cursor}
+	}
+
+	// Fetch one extra document to detect has-more without a separate count.
+	opts := options.Find().
+		SetLimit(limit + 1).
+		SetSort(bson.D{{Key: "_id", Value: -1}})
+
+	cur, err := r.crawlingResults().Find(ctx, filter, opts)
+	if err != nil {
+		return nil, false, err
+	}
+	defer cur.Close(ctx)
+
+	var results []models.CrawlingResult
+	if err := cur.All(ctx, &results); err != nil {
+		return nil, false, err
+	}
+
+	hasMore := int64(len(results)) > limit
+	if hasMore {
+		results = results[:limit]
+	}
+	return results, hasMore, nil
+}
+
+// StreamCrawlingResults yields each matching result to the callback in
+// _id-desc order. Used for CSV export to avoid loading the full set into
+// memory. The callback returning an error stops the iteration.
+func (r *MongoRepository) StreamCrawlingResults(
+	ctx context.Context,
+	crawlingID primitive.ObjectID,
+	filter bson.M,
+	yield func(*models.CrawlingResult) error,
+) error {
+	filter["crawling_id"] = crawlingID
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "_id", Value: -1}}).
+		SetBatchSize(500)
+
+	cur, err := r.crawlingResults().Find(ctx, filter, opts)
+	if err != nil {
+		return err
+	}
+	defer cur.Close(ctx)
+
+	for cur.Next(ctx) {
+		var doc models.CrawlingResult
+		if err := cur.Decode(&doc); err != nil {
+			return err
+		}
+		if err := yield(&doc); err != nil {
+			return err
+		}
+	}
+	return cur.Err()
+}
+
 // --- Failure Operations ---
 
 func (r *MongoRepository) InsertCrawlFailure(ctx context.Context, failure *models.CrawlFailure) error {

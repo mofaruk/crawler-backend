@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/csv"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -772,6 +775,198 @@ func (h *Handler) GetCrawlingResults(c *gin.Context) {
 		"skip":  skip,
 		"limit": limit,
 	})
+}
+
+// --- Crawled URL List (cursor pagination) ---
+
+// GET /crawlings/:id/urls?cursor=&limit=50&q=&url_type=&status_code=&header=&value=
+func (h *Handler) ListCrawledURLs(c *gin.Context) {
+	oid, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid crawling ID", Code: "INVALID_ID"})
+		return
+	}
+
+	filter := buildResultsFilter(c)
+
+	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	var cursor primitive.ObjectID
+	if raw := c.Query("cursor"); raw != "" {
+		parsed, err := primitive.ObjectIDFromHex(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid cursor", Code: "INVALID_CURSOR"})
+			return
+		}
+		cursor = parsed
+	}
+
+	results, hasMore, err := h.repo.ListCrawlingResultsByCursor(c.Request.Context(), oid, filter, cursor, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list crawled URLs")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to list crawled URLs"})
+		return
+	}
+
+	var nextCursor string
+	if hasMore && len(results) > 0 {
+		nextCursor = results[len(results)-1].ID.Hex()
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":        results,
+		"limit":       limit,
+		"has_more":    hasMore,
+		"next_cursor": nextCursor,
+	})
+}
+
+// GET /crawlings/:id/urls/export — streams CSV of every matching result.
+// Same filter set as ListCrawledURLs; no pagination, no row cap.
+func (h *Handler) ExportCrawledURLs(c *gin.Context) {
+	oid, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid crawling ID", Code: "INVALID_ID"})
+		return
+	}
+
+	crawling, err := h.repo.GetCrawling(c.Request.Context(), oid)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "crawling not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	site, err := h.repo.GetSite(c.Request.Context(), crawling.SiteID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	filter := buildResultsFilter(c)
+
+	filename := fmt.Sprintf("crawl-%s-urls-%s.csv", oid.Hex(), time.Now().UTC().Format("20060102-150405"))
+	c.Writer.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	c.Writer.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Writer.Header().Set("Cache-Control", "no-store")
+	c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	w := csv.NewWriter(c.Writer)
+	flusher, _ := c.Writer.(http.Flusher)
+
+	header := append([]string{"url", "status_code", "content_type", "response_time_ms", "crawled_at"}, site.ExtractData...)
+	if err := w.Write(header); err != nil {
+		log.Error().Err(err).Msg("csv export: failed to write header")
+		return
+	}
+
+	rowCount := 0
+	streamErr := h.repo.StreamCrawlingResults(c.Request.Context(), oid, filter, func(doc *models.CrawlingResult) error {
+		row := make([]string, 0, len(header))
+		row = append(row,
+			doc.URL,
+			strconv.Itoa(doc.StatusCode),
+			doc.ContentType,
+			strconv.FormatInt(doc.ResponseTime, 10),
+			doc.CrawledAt.UTC().Format(time.RFC3339),
+		)
+		for _, h := range site.ExtractData {
+			row = append(row, doc.Headers[h])
+		}
+		if err := w.Write(row); err != nil {
+			return err
+		}
+		rowCount++
+		// Flush periodically so the browser shows progress and TCP keepalives stay alive.
+		if rowCount%500 == 0 {
+			w.Flush()
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		return nil
+	})
+
+	w.Flush()
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	if streamErr != nil {
+		// Headers already sent — best effort to log; client sees a truncated file.
+		log.Error().Err(streamErr).Int("rows_written", rowCount).Msg("csv export stream interrupted")
+	}
+}
+
+// buildResultsFilter assembles the MongoDB filter for the URL list / export
+// endpoints from the request query string. Caller supplies crawling_id.
+func buildResultsFilter(c *gin.Context) bson.M {
+	filter := bson.M{}
+
+	if statusCode := c.Query("status_code"); statusCode != "" {
+		if code, err := strconv.Atoi(statusCode); err == nil {
+			filter["status_code"] = code
+		}
+	}
+
+	if header := strings.TrimSpace(c.Query("header")); header != "" {
+		// HTTP header names are case-insensitive (RFC 7230) but Mongo field
+		// paths are exact. Iterate the headers map at query time and match by
+		// regex so the user's casing doesn't matter, regardless of what casing
+		// the source server returned.
+		nameRegex := "^" + regexp.QuoteMeta(header) + "$"
+
+		conds := bson.A{
+			bson.M{"$regexMatch": bson.M{
+				"input":   "$$pair.k",
+				"regex":   nameRegex,
+				"options": "i",
+			}},
+		}
+		if value := strings.TrimSpace(c.Query("value")); value != "" {
+			valueRegex := "^" + regexp.QuoteMeta(value) + "$"
+			conds = append(conds, bson.M{"$regexMatch": bson.M{
+				"input":   "$$pair.v",
+				"regex":   valueRegex,
+				"options": "i",
+			}})
+		}
+
+		filter["$expr"] = bson.M{
+			"$anyElementTrue": bson.A{
+				bson.M{"$map": bson.M{
+					"input": bson.M{"$objectToArray": bson.M{"$ifNull": bson.A{"$headers", bson.M{}}}},
+					"as":    "pair",
+					"in":    bson.M{"$and": conds},
+				}},
+			},
+		}
+	}
+
+	if q := strings.TrimSpace(c.Query("q")); q != "" {
+		filter["url"] = bson.M{
+			"$regex":   regexp.QuoteMeta(q),
+			"$options": "i",
+		}
+	}
+
+	switch strings.ToLower(c.Query("url_type")) {
+	case "static":
+		filter["content_type"] = bson.M{
+			"$regex":   `^(text/css|application/javascript|application/x-javascript|image/|font/|video/|audio/|application/octet-stream|application/font-)`,
+			"$options": "i",
+		}
+	case "dynamic":
+		filter["content_type"] = bson.M{
+			"$regex":   `^(text/html|application/json|application/xml|text/xml|text/plain|application/xhtml)`,
+			"$options": "i",
+		}
+	}
+
+	return filter
 }
 
 // --- Health ---

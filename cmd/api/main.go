@@ -99,6 +99,8 @@ func main() {
 	router.GET("/crawlings/:id/failures", handler.GetCrawlingFailures)
 	router.GET("/crawlings/:id/results", handler.GetCrawlingResults)
 	router.GET("/crawlings/:id/results/analytics", handler.GetHeaderAnalytics)
+	router.GET("/crawlings/:id/urls", handler.ListCrawledURLs)
+	router.GET("/crawlings/:id/urls/export", handler.ExportCrawledURLs)
 
 	// --- Metrics Server ---
 	metricsSrv := &http.Server{
