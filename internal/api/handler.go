@@ -268,12 +268,19 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 		speed = 72000
 	}
 
+	// Default URL-type scope; "all" if unset or empty.
+	urlType := req.URLType
+	if urlType == "" {
+		urlType = models.CrawlURLTypeAll
+	}
+
 	// Create crawling job
 	crawling := &models.Crawling{
 		SiteID:       siteID,
 		Status:       models.CrawlStatusPending,
 		Speed:        speed,
 		ReloadSource: req.ReloadSource,
+		URLType:      urlType,
 	}
 
 	if err := h.repo.CreateCrawling(c.Request.Context(), crawling); err != nil {
@@ -292,6 +299,23 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 		"status":  crawling.Status,
 		"message": "crawling job created, URL ingestion started",
 	})
+}
+
+// allowsURL reports whether a URL passes the crawling's url_type scope. An
+// empty/unset/"all" scope passes everything. Classification is extension-based
+// (see discovery.IsStaticURL) — a heuristic, since we don't know Content-Type
+// until after fetching.
+func allowsURL(scope, rawURL string) bool {
+	switch scope {
+	case "", models.CrawlURLTypeAll:
+		return true
+	case models.CrawlURLTypeStatic:
+		return discovery.IsStaticURL(rawURL)
+	case models.CrawlURLTypeDynamic:
+		return !discovery.IsStaticURL(rawURL)
+	default:
+		return true
+	}
 }
 
 // ingestURLs fetches the URL source and pushes URLs into the queue. For
@@ -327,6 +351,8 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 
 	logger.Info().Int("url_count", len(urls)).Msg("URLs parsed from source")
 
+	// Provisional total — corrected at the end to reflect what actually
+	// passed the type filter and dedup.
 	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, len(urls))
 
 	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
@@ -346,6 +372,9 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 
 		var tasks []models.CrawlTask
 		for _, u := range urls[i:end] {
+			if !allowsURL(crawling.URLType, u) {
+				continue
+			}
 			urlHash := dedup.HashURL(u)
 			isNew, err := h.dedup.MarkSeen(ctx, crawlingID, urlHash)
 			if err != nil {
@@ -378,6 +407,15 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 	}
 
 	logger.Info().Int("enqueued", totalEnqueued).Msg("URL ingestion complete")
+
+	// Correct total to actual enqueued count (post-filter, post-dedup).
+	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, totalEnqueued)
+
+	if totalEnqueued == 0 {
+		// Type filter excluded everything (or source was all duplicates).
+		_ = h.repo.SetCrawlingError(ctx, oid, "no URLs passed the url_type filter; nothing to crawl")
+		return
+	}
 
 	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusRunning)
 	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusRunning)
@@ -447,6 +485,12 @@ func (h *Handler) ingestAutoDiscovery(
 	emit := func(rawURL string) bool {
 		if ctx.Err() != nil {
 			return false
+		}
+		// Type-scope filter — discovery still walks HTML pages so we find
+		// linked static assets, but URLs that don't match the scope never
+		// hit the queue.
+		if !allowsURL(crawling.URLType, rawURL) {
+			return true
 		}
 		urlHash := dedup.HashURL(rawURL)
 		isNew, err := h.dedup.MarkSeen(ctx, crawlingID, urlHash)

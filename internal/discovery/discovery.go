@@ -206,6 +206,21 @@ func (s *discoverState) dispatchHTML(u *url.URL) {
 	}
 }
 
+// IsStaticURL classifies a raw URL by its path extension. Returns true if the
+// extension marks it as a static asset (CSS, JS, image, font, media, etc.).
+//
+// This is the inverse of looksLikeHTML and is exported so ingestion paths can
+// enforce the per-crawl url_type filter (all / static / dynamic) without
+// re-implementing the extension table. URLs that fail to parse, or whose path
+// has no known extension, are reported as non-static.
+func IsStaticURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return !looksLikeHTML(u)
+}
+
 // looksLikeHTML uses a fast extension check to decide whether a URL is worth
 // fetching for further link extraction. The fetcher itself also gates on
 // Content-Type, so false positives just cost one HEAD-equivalent GET.

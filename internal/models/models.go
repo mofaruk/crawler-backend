@@ -27,6 +27,16 @@ const (
 	URLSourceTypeAuto = "auto" // auto-discover by crawling base_url
 )
 
+// CrawlURLType narrows which URLs a crawling job actually fetches. Classified
+// at ingestion time using the URL's path extension, so the response Content-Type
+// is irrelevant — this is a *pre-fetch* filter, distinct from the post-fetch
+// content_type filter on the URL list view.
+const (
+	CrawlURLTypeAll     = "all"     // default — crawl everything
+	CrawlURLTypeStatic  = "static"  // only URLs with static-asset extensions
+	CrawlURLTypeDynamic = "dynamic" // only URLs without static-asset extensions
+)
+
 // --- Site ---
 
 type Site struct {
@@ -50,6 +60,7 @@ type Crawling struct {
 	Status         CrawlStatus        `bson:"status" json:"status"`
 	Speed          int                `bson:"speed" json:"speed"`                       // URLs per hour
 	ReloadSource   bool               `bson:"reload_source" json:"reload_source"`
+	URLType        string             `bson:"url_type,omitempty" json:"url_type,omitempty"` // "all" | "static" | "dynamic"
 	TotalURLs      int                `bson:"total_urls" json:"total_urls"`
 	CrawledURLs    int                `bson:"crawled_urls" json:"crawled_urls"`
 	FailedURLs     int                `bson:"failed_urls" json:"failed_urls"`
@@ -153,6 +164,7 @@ type StartCrawlingRequest struct {
 	SiteID       string `json:"site_id" binding:"required"`
 	Speed        int    `json:"speed"`
 	ReloadSource bool   `json:"reload_source"`
+	URLType      string `json:"url_type" binding:"omitempty,oneof=all static dynamic"`
 }
 
 type CrawlProgressResponse struct {
