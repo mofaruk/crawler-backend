@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -56,9 +57,21 @@ func (r *MongoRepository) Close(ctx context.Context) error {
 // --- Index Setup ---
 
 func (r *MongoRepository) ensureIndexes(ctx context.Context) error {
+	// base_url is intentionally NOT unique: two different users may legitimately
+	// crawl the same site, each owning their own site document. Per-user
+	// uniqueness is enforced in the dashboard. Drop the legacy unique index if
+	// a previous deploy created it (CreateMany won't replace a conflicting one).
+	if _, err := r.sites().Indexes().DropOne(ctx, "base_url_1"); err != nil {
+		// "index not found" is expected on fresh installs — log nothing.
+		if !strings.Contains(err.Error(), "index not found") &&
+			!strings.Contains(err.Error(), "IndexNotFound") {
+			log.Warn().Err(err).Msg("could not drop legacy unique base_url index")
+		}
+	}
+
 	// sites indexes
 	_, err := r.sites().Indexes().CreateMany(ctx, []mongo.IndexModel{
-		{Keys: bson.D{{Key: "base_url", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "base_url", Value: 1}}}, // non-unique, for lookups
 		{Keys: bson.D{{Key: "name", Value: 1}}},
 	})
 	if err != nil {
