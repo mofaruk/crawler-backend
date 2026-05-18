@@ -468,6 +468,91 @@ curl "http://localhost:8088/crawlings/65f1a2b3c1d2e3f4a5b6c7d9/failures?skip=0&l
 
 ---
 
+## Analytics
+
+All analytics endpoints return a value→count distribution plus the grand
+total. The dashboard renders these as pie charts.
+
+### Per-crawl: response header distribution
+
+Distribution of one response header's values for a single crawl. The header
+must be one of the site's `extract_data` headers (case-insensitive match).
+
+```bash
+curl "http://localhost:8088/crawlings/65f1a2b3.../results/analytics?header=cf-cache-status"
+```
+
+**Response:**
+```json
+{
+  "header": "cf-cache-status",
+  "total": 4830,
+  "values": [
+    { "value": "HIT",  "count": 3900 },
+    { "value": "MISS", "count": 930 }
+  ]
+}
+```
+
+### Per-crawl: HTTP status code distribution
+
+```bash
+curl "http://localhost:8088/crawlings/65f1a2b3.../status-analytics"
+```
+
+**Response:**
+```json
+{
+  "metric": "status_code",
+  "total": 4850,
+  "values": [
+    { "value": "200", "count": 4790 },
+    { "value": "404", "count": 48 },
+    { "value": "500", "count": 12 }
+  ]
+}
+```
+
+### Per-site: combined analytics (last N days)
+
+Aggregated across **all crawls** of a site within the window. Returns the
+HTTP status distribution plus one distribution per header configured in the
+site's `extract_data`. `days` defaults to 7 and is clamped to 1–90.
+
+```bash
+curl "http://localhost:8088/sites/65f1a2b0.../analytics?days=7"
+```
+
+**Response:**
+```json
+{
+  "site_id": "65f1a2b0...",
+  "days": 7,
+  "from": "2024-03-02T10:00:00Z",
+  "to": "2024-03-09T10:00:00Z",
+  "status": {
+    "total": 12000,
+    "values": [ { "value": "200", "count": 11800 }, { "value": "404", "count": 200 } ]
+  },
+  "headers": {
+    "Content-Type": {
+      "total": 12000,
+      "values": [ { "value": "text/html", "count": 9000 }, { "value": "application/javascript", "count": 3000 } ]
+    },
+    "Server": {
+      "total": 11900,
+      "values": [ { "value": "nginx", "count": 11900 } ]
+    }
+  }
+}
+```
+
+Edge cases: an unknown/invalid site id returns `404 NOT_FOUND`; a site with
+no results in the window returns `total: 0` and empty `values` arrays; a
+header with no captured values is simply absent or has an empty `values`.
+
+---
+
 ## Complete Crawling Workflow
 
 Here is a full end-to-end example:

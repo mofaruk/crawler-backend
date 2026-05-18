@@ -817,6 +817,8 @@ make clean
 | POST | `/sites` | Create a new site |
 | GET | `/sites` | List all sites (paginated) |
 | GET | `/sites/:id` | Get site details |
+| GET | `/sites/:id/analytics` | Per-site analytics (status + per-header) over the last `days` days (default 7) |
+| PUT | `/sites/:id` | Update a site |
 | DELETE | `/sites/:id` | Delete a site |
 
 ### Crawlings
@@ -831,6 +833,11 @@ make clean
 | POST | `/crawlings/:id/stop` | Stop a crawl (cleanup queues) |
 | GET | `/crawlings/:id/progress` | Get real-time progress + queue stats |
 | GET | `/crawlings/:id/failures` | List failed URLs |
+| GET | `/crawlings/:id/results` | List crawl results (header/value/status filters, pagination) |
+| GET | `/crawlings/:id/results/analytics` | Per-crawl value distribution for one response header (`?header=`) |
+| GET | `/crawlings/:id/status-analytics` | Per-crawl HTTP status code distribution |
+| GET | `/crawlings/:id/urls` | Cursor-paginated crawled URL list (filters: `q`, `url_type`, `status_code`, `header`, `value`) |
+| GET | `/crawlings/:id/urls/export` | Stream the filtered crawled URL list as CSV |
 
 ### Health
 

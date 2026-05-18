@@ -782,6 +782,88 @@ func (h *Handler) GetHeaderAnalytics(c *gin.Context) {
 	})
 }
 
+// GET /crawlings/:id/status-analytics — HTTP status code distribution for a crawl.
+func (h *Handler) GetCrawlingStatusAnalytics(c *gin.Context) {
+	oid, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid crawling ID", Code: "INVALID_ID"})
+		return
+	}
+
+	values, total, err := h.repo.GetCrawlingStatusAnalytics(c.Request.Context(), oid)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get crawl status analytics")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get status analytics"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"metric": "status_code",
+		"total":  total,
+		"values": values,
+	})
+}
+
+// GET /sites/:id/analytics?days=7 — combined per-site analytics over the last
+// N days: HTTP status distribution plus a distribution for every header in the
+// site's extract_data, aggregated across all of the site's crawl results.
+func (h *Handler) GetSiteAnalytics(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	site, err := h.repo.GetSite(c.Request.Context(), siteID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	// Window: last `days` days (default 7, clamped 1..90).
+	days := 7
+	if raw := c.Query("days"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > 90 {
+		days = 90
+	}
+	to := time.Now().UTC()
+	from := to.AddDate(0, 0, -days)
+
+	statusValues, statusTotal, err := h.repo.GetSiteStatusAnalytics(c.Request.Context(), siteID, from, to)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get site status analytics")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site analytics"})
+		return
+	}
+
+	headers := gin.H{}
+	for _, header := range site.ExtractData {
+		header = strings.TrimSpace(header)
+		if header == "" {
+			continue
+		}
+		values, total, err := h.repo.GetSiteHeaderAnalytics(c.Request.Context(), siteID, header, from, to)
+		if err != nil {
+			log.Error().Err(err).Str("header", header).Msg("failed to get site header analytics")
+			continue // skip this header rather than failing the whole response
+		}
+		headers[header] = gin.H{"total": total, "values": values}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"site_id": siteID.Hex(),
+		"days":    days,
+		"from":    from,
+		"to":      to,
+		"status":  gin.H{"total": statusTotal, "values": statusValues},
+		"headers": headers,
+	})
+}
+
 // GET /crawlings/:id/results?header=cf-cache-status&value=MISS&skip=0&limit=20
 func (h *Handler) GetCrawlingResults(c *gin.Context) {
 	oid, err := primitive.ObjectIDFromHex(c.Param("id"))

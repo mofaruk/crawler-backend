@@ -85,6 +85,7 @@ func main() {
 	router.POST("/sites", handler.CreateSite)
 	router.GET("/sites", handler.ListSites)
 	router.GET("/sites/:id", handler.GetSite)
+	router.GET("/sites/:id/analytics", handler.GetSiteAnalytics)
 	router.PUT("/sites/:id", handler.UpdateSite)
 	router.DELETE("/sites/:id", handler.DeleteSite)
 
@@ -99,6 +100,7 @@ func main() {
 	router.GET("/crawlings/:id/failures", handler.GetCrawlingFailures)
 	router.GET("/crawlings/:id/results", handler.GetCrawlingResults)
 	router.GET("/crawlings/:id/results/analytics", handler.GetHeaderAnalytics)
+	router.GET("/crawlings/:id/status-analytics", handler.GetCrawlingStatusAnalytics)
 	router.GET("/crawlings/:id/urls", handler.ListCrawledURLs)
 	router.GET("/crawlings/:id/urls/export", handler.ExportCrawledURLs)
 

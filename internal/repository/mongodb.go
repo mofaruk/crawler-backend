@@ -359,16 +359,15 @@ func (r *MongoRepository) BulkInsertResults(ctx context.Context, results []model
 
 // --- Result Query Operations ---
 
-func (r *MongoRepository) GetHeaderAnalytics(ctx context.Context, crawlingID primitive.ObjectID, headerName string) ([]models.HeaderValueCount, int64, error) {
-	fieldPath := "headers." + headerName
-
+// aggregateDistribution groups crawling_results by `$<groupField>` over the
+// given match filter and returns the value→count distribution (count desc)
+// plus the grand total. Shared by every analytics endpoint (per-crawl and
+// per-site, header and status).
+func (r *MongoRepository) aggregateDistribution(ctx context.Context, match bson.M, groupField string) ([]models.HeaderValueCount, int64, error) {
 	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.M{
-			"crawling_id": crawlingID,
-			fieldPath:     bson.M{"$exists": true, "$ne": nil},
-		}}},
+		{{Key: "$match", Value: match}},
 		{{Key: "$group", Value: bson.M{
-			"_id":   "$" + fieldPath,
+			"_id":   "$" + groupField,
 			"count": bson.M{"$sum": 1},
 		}}},
 		{{Key: "$sort", Value: bson.D{{Key: "count", Value: -1}}}},
@@ -380,7 +379,7 @@ func (r *MongoRepository) GetHeaderAnalytics(ctx context.Context, crawlingID pri
 	}
 	defer cursor.Close(ctx)
 
-	var results []models.HeaderValueCount
+	results := make([]models.HeaderValueCount, 0)
 	var total int64
 	for cursor.Next(ctx) {
 		var doc struct {
@@ -394,13 +393,43 @@ func (r *MongoRepository) GetHeaderAnalytics(ctx context.Context, crawlingID pri
 		if doc.Value != nil {
 			value = fmt.Sprintf("%v", doc.Value)
 		}
-		results = append(results, models.HeaderValueCount{
-			Value: value,
-			Count: doc.Count,
-		})
+		results = append(results, models.HeaderValueCount{Value: value, Count: doc.Count})
 		total += doc.Count
 	}
-	return results, total, nil
+	return results, total, cursor.Err()
+}
+
+// GetHeaderAnalytics — per-crawl distribution of one response header's values.
+func (r *MongoRepository) GetHeaderAnalytics(ctx context.Context, crawlingID primitive.ObjectID, headerName string) ([]models.HeaderValueCount, int64, error) {
+	fieldPath := "headers." + headerName
+	return r.aggregateDistribution(ctx, bson.M{
+		"crawling_id": crawlingID,
+		fieldPath:     bson.M{"$exists": true, "$ne": nil},
+	}, fieldPath)
+}
+
+// GetCrawlingStatusAnalytics — per-crawl distribution of HTTP status codes.
+func (r *MongoRepository) GetCrawlingStatusAnalytics(ctx context.Context, crawlingID primitive.ObjectID) ([]models.HeaderValueCount, int64, error) {
+	return r.aggregateDistribution(ctx, bson.M{"crawling_id": crawlingID}, "status_code")
+}
+
+// GetSiteHeaderAnalytics — per-site distribution of one header's values across
+// every result crawled in [from, to).
+func (r *MongoRepository) GetSiteHeaderAnalytics(ctx context.Context, siteID primitive.ObjectID, headerName string, from, to time.Time) ([]models.HeaderValueCount, int64, error) {
+	fieldPath := "headers." + headerName
+	return r.aggregateDistribution(ctx, bson.M{
+		"site_id":    siteID,
+		"crawled_at": bson.M{"$gte": from, "$lt": to},
+		fieldPath:    bson.M{"$exists": true, "$ne": nil},
+	}, fieldPath)
+}
+
+// GetSiteStatusAnalytics — per-site HTTP status distribution across [from, to).
+func (r *MongoRepository) GetSiteStatusAnalytics(ctx context.Context, siteID primitive.ObjectID, from, to time.Time) ([]models.HeaderValueCount, int64, error) {
+	return r.aggregateDistribution(ctx, bson.M{
+		"site_id":    siteID,
+		"crawled_at": bson.M{"$gte": from, "$lt": to},
+	}, "status_code")
 }
 
 func (r *MongoRepository) GetCrawlingResults(ctx context.Context, crawlingID primitive.ObjectID, filter bson.M, skip, limit int64) ([]models.CrawlingResult, int64, error) {
