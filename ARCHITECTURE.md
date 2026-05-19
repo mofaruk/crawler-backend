@@ -699,7 +699,7 @@ crawler-backend/
 │   ├── repository/
 │   │   └── mongodb.go           # MongoDB operations with indexes
 │   ├── source/
-│   │   └── parser.go            # CSV/XML URL source parser
+│   │   └── parser.go            # CSV/XML source parser (follows sitemap index)
 │   ├── webhook/
 │   │   └── webhook.go           # Webhook event dispatcher with HMAC signing
 │   └── worker/
@@ -740,7 +740,7 @@ crawler-backend/
 | `internal/queue` | Redis-based distributed queue with Lua scripts for atomicity |
 | `internal/ratelimiter` | Distributed token bucket with Lua script |
 | `internal/repository` | MongoDB CRUD with bulk operations and indexes |
-| `internal/source` | CSV/XML file fetcher and URL extractor |
+| `internal/source` | CSV/XML fetcher; recursively follows <sitemapindex> children (gzip-aware) |
 | `internal/webhook` | HTTP webhook delivery with HMAC-SHA256 signing |
 | `internal/worker` | Goroutine pool, task processing, recovery loop |
 

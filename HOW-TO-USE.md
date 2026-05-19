@@ -239,6 +239,27 @@ Standard sitemap XML format:
 </urlset>
 ```
 
+**Sitemap index files are supported.** If `url_source` points at a
+`<sitemapindex>` (e.g. `sitemap_index.xml`), each referenced child sitemap is
+fetched and parsed automatically to collect the page URLs:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://example.com/post-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://example.com/page-sitemap.xml.gz</loc></sitemap>
+</sitemapindex>
+```
+
+Notes:
+- gzip-compressed child sitemaps (`.xml.gz`) are decompressed transparently
+  (detected by content, not extension);
+- nesting is followed up to 5 levels deep, with cycle protection;
+- an unreachable/invalid *child* sitemap is skipped (logged) so one bad child
+  doesn't fail the whole crawl; a failing *root* source still errors;
+- the site's `url_limit` caps the total URLs collected across all child
+  sitemaps.
+
 #### Update a site
 
 Update one or more fields of an existing site. Only include the fields you want to change.
