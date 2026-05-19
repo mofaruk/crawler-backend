@@ -336,7 +336,7 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 	// --- Static-source (CSV / XML) path ---
 
 	logger.Info().Str("source", site.URLSource).Msg("fetching URL source")
-	urls, err := h.parser.ParseURLs(ctx, site.URLSource, site.URLSourceType, site.URLLimit)
+	urls, err := h.parser.ParseURLs(ctx, site.URLSource, site.URLSourceType, site.UserAgent, site.URLLimit)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to parse URL source")
 		_ = h.repo.SetCrawlingError(ctx, oid, "failed to parse URL source: "+err.Error())

@@ -30,11 +30,17 @@ func NewURLParser() *URLParser {
 }
 
 // ParseURLs fetches the source file and streams URLs through the channel.
-// This avoids loading the entire file into memory.
-func (p *URLParser) ParseURLs(ctx context.Context, sourceURL, sourceType string, limit int) ([]string, error) {
+// This avoids loading the entire file into memory. userAgent is the site's
+// configured User-Agent; sent so hosts that key on it behave consistently
+// with the actual crawl.
+func (p *URLParser) ParseURLs(ctx context.Context, sourceURL, sourceType, userAgent string, limit int) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
 	}
 
 	resp, err := p.client.Do(req)
