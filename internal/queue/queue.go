@@ -304,3 +304,14 @@ func (q *DistributedQueue) QueueLength(ctx context.Context, crawlingID string) (
 	}
 	return stats.Pending + stats.Processing + stats.Retry, nil
 }
+
+// PendingLen returns just the length of the pending list (cheap, single LLEN).
+// Used by the dispatcher to avoid acquiring more rate-limit tokens than there
+// are tasks ready to dispatch.
+func (q *DistributedQueue) PendingLen(ctx context.Context, crawlingID string) (int64, error) {
+	n, err := q.rdb.LLen(ctx, pendingKey(crawlingID)).Result()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return n, err
+}

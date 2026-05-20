@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,17 +20,25 @@ import (
 	"github.com/webkonsulenterne/crawler-backend/internal/repository"
 )
 
-// Pool manages a set of worker goroutines that process crawl tasks.
+// Pool runs the crawler's task processing pipeline.
 //
-// Lifecycle:
-//   1. Pool starts N goroutines (WORKER_CONCURRENCY)
-//   2. Each goroutine polls for active crawling jobs
-//   3. For each job, it acquires rate limit tokens
-//   4. Dequeues tasks from the job's queue
-//   5. Fetches URLs using the HTTP fetcher
-//   6. Stores results in MongoDB
-//   7. Acknowledges tasks or sends to retry
-//   8. Respects job state changes (pause/stop) in near real-time
+// Architecture (single-producer / multi-consumer):
+//   - One dispatcher goroutine is the sole owner of Redis polling. Each cycle
+//     it refreshes the active-crawlings set, then per active crawl peeks at
+//     the pending queue length, acquires that many rate-limit tokens (bounded
+//     by WorkerBatchSize and channel headroom), dequeues, and forwards tasks
+//     to consumer workers via workCh.
+//   - N consumer goroutines (WORKER_CONCURRENCY) receive dispatchedTask
+//     values and execute the HTTP fetch + Mongo insert + ack lifecycle. They
+//     do not touch Redis except via queue.Ack / queue.Retry.
+//
+// This eliminates the O(N_workers × N_crawls) polling fan-out that the
+// previous per-worker design produced under load.
+
+type dispatchedTask struct {
+	crawlingID string
+	task       *models.CrawlTask
+}
 
 type Pool struct {
 	cfg          *config.Config
@@ -39,6 +48,7 @@ type Pool struct {
 	fetcher      *crawler.HTTPFetcher
 	repo         *repository.MongoRepository
 
+	workCh        chan dispatchedTask
 	activeWorkers atomic.Int64
 	wg            sync.WaitGroup
 	cancel        context.CancelFunc
@@ -66,16 +76,21 @@ func NewPool(
 func (p *Pool) Start(ctx context.Context) {
 	ctx, p.cancel = context.WithCancel(ctx)
 
+	// Channel buffer matches consumer count so a full buffer means every
+	// worker is busy — natural back-pressure on the dispatcher.
+	p.workCh = make(chan dispatchedTask, p.cfg.WorkerConcurrency)
+
 	log.Info().Int("concurrency", p.cfg.WorkerConcurrency).Msg("starting worker pool")
 
-	// Launch recovery goroutine
 	p.wg.Add(1)
 	go p.recoveryLoop(ctx)
 
-	// Launch worker goroutines
+	p.wg.Add(1)
+	go p.dispatcherLoop(ctx)
+
 	for i := 0; i < p.cfg.WorkerConcurrency; i++ {
 		p.wg.Add(1)
-		go p.workerLoop(ctx, i)
+		go p.consumerLoop(ctx, i)
 	}
 
 	log.Info().Int("workers", p.cfg.WorkerConcurrency).Msg("worker pool started")
@@ -92,38 +107,38 @@ func (p *Pool) Stop() {
 	log.Info().Msg("worker pool stopped")
 }
 
-// workerLoop is the main loop for each worker goroutine.
-func (p *Pool) workerLoop(ctx context.Context, workerID int) {
+// dispatcherLoop is the sole Redis-polling goroutine. Each cycle it refreshes
+// the active-crawlings set and, per crawl, peeks at queue length, acquires
+// matching rate-limit tokens, dequeues a batch, and hands the tasks off to
+// consumer workers via workCh.
+func (p *Pool) dispatcherLoop(ctx context.Context) {
 	defer p.wg.Done()
-
-	logger := log.With().Int("worker_id", workerID).Logger()
-	logger.Debug().Msg("worker started")
 
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Debug().Msg("worker shutting down")
 			return
 		default:
 		}
 
-		// Get active crawling jobs
 		crawlingIDs, err := p.stateManager.GetActiveCrawlings(ctx)
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to get active crawlings")
+			log.Error().Err(err).Msg("dispatcher: failed to get active crawlings")
 			sleepCtx(ctx, p.cfg.WorkerPollInterval)
 			continue
 		}
 
 		if len(crawlingIDs) == 0 {
-			metrics.WorkerIdleGauge.Inc()
 			sleepCtx(ctx, p.cfg.WorkerPollInterval)
-			metrics.WorkerIdleGauge.Dec()
 			continue
 		}
 
-		// Round-robin across active jobs for fairness
-		processed := false
+		rand.Shuffle(len(crawlingIDs), func(i, j int) {
+			crawlingIDs[i], crawlingIDs[j] = crawlingIDs[j], crawlingIDs[i]
+		})
+
+		dispatched := 0
+		tokensSeen := false
 		for _, crawlingID := range crawlingIDs {
 			select {
 			case <-ctx.Done():
@@ -131,56 +146,125 @@ func (p *Pool) workerLoop(ctx context.Context, workerID int) {
 			default:
 			}
 
-			// Check job state
-			state, err := p.stateManager.GetState(ctx, crawlingID)
+			// Stop the inner loop early if the worker channel is full — any
+			// further dequeues would just block the dispatcher.
+			if len(p.workCh) == cap(p.workCh) {
+				break
+			}
+
+			sent, gotTokens, err := p.dispatchOne(ctx, crawlingID)
 			if err != nil {
-				continue
+				log.Error().Err(err).Str("crawling_id", crawlingID).Msg("dispatcher: dispatch error")
+			}
+			dispatched += sent
+			if gotTokens {
+				tokensSeen = true
+			}
+		}
+
+		if dispatched == 0 {
+			delay := p.cfg.WorkerPollInterval
+			if !tokensSeen {
+				// Everyone throttled — back off harder so buckets can refill.
+				delay = 5 * p.cfg.WorkerPollInterval
+			}
+			sleepCtx(ctx, delay)
+		}
+	}
+}
+
+// dispatchOne processes a single crawl: validates state, peeks at queue
+// length, acquires rate-limit tokens (capped at WorkerBatchSize and channel
+// headroom), dequeues a matching batch, and forwards each task to workCh.
+//
+// Returns the number of tasks actually sent and whether any tokens were
+// acquired (used by the caller to choose its backoff).
+func (p *Pool) dispatchOne(ctx context.Context, crawlingID string) (sent int, gotTokens bool, err error) {
+	state, err := p.stateManager.GetState(ctx, crawlingID)
+	if err != nil || state != models.CrawlStatusRunning {
+		return 0, false, err
+	}
+
+	// Peek at pending length so we don't consume tokens we can't use.
+	pending, err := p.queue.PendingLen(ctx, crawlingID)
+	if err != nil {
+		return 0, false, err
+	}
+	if pending == 0 {
+		p.checkJobCompletion(ctx, crawlingID)
+		return 0, false, nil
+	}
+
+	free := cap(p.workCh) - len(p.workCh)
+	if free <= 0 {
+		return 0, false, nil
+	}
+
+	want := int(pending)
+	if want > p.cfg.WorkerBatchSize {
+		want = p.cfg.WorkerBatchSize
+	}
+	if want > free {
+		want = free
+	}
+
+	acquired, err := p.rateLimiter.Acquire(ctx, crawlingID, want)
+	if err != nil {
+		return 0, false, err
+	}
+	if acquired == 0 {
+		metrics.RateLimitWaits.WithLabelValues(crawlingID).Inc()
+		return 0, false, nil
+	}
+	metrics.RateLimitTokensAcquired.WithLabelValues(crawlingID).Add(float64(acquired))
+
+	tasks, err := p.queue.DequeueBatch(ctx, crawlingID, acquired)
+	if err != nil {
+		return 0, true, err
+	}
+
+	for i := range tasks {
+		t := tasks[i]
+		select {
+		case p.workCh <- dispatchedTask{crawlingID: crawlingID, task: &t}:
+			sent++
+		case <-ctx.Done():
+			return sent, true, nil
+		}
+	}
+	return sent, true, nil
+}
+
+// consumerLoop is the main loop for each worker goroutine. It blocks on the
+// dispatcher channel and only does real work — no Redis polling.
+func (p *Pool) consumerLoop(ctx context.Context, workerID int) {
+	defer p.wg.Done()
+
+	logger := log.With().Int("worker_id", workerID).Logger()
+	logger.Debug().Msg("worker started")
+
+	metrics.WorkerIdleGauge.Inc()
+	defer metrics.WorkerIdleGauge.Dec()
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Debug().Msg("worker shutting down")
+			return
+		case dt, ok := <-p.workCh:
+			if !ok {
+				return
 			}
 
-			if state != models.CrawlStatusRunning {
-				continue
-			}
-
-			// Try to acquire a rate limit token
-			acquired, err := p.rateLimiter.Acquire(ctx, crawlingID, 1)
-			if err != nil {
-				logger.Error().Err(err).Str("crawling_id", crawlingID).Msg("rate limiter error")
-				continue
-			}
-
-			if acquired == 0 {
-				metrics.RateLimitWaits.WithLabelValues(crawlingID).Inc()
-				continue
-			}
-
-			metrics.RateLimitTokensAcquired.WithLabelValues(crawlingID).Add(float64(acquired))
-
-			// Dequeue a task
-			task, err := p.queue.Dequeue(ctx, crawlingID)
-			if err != nil {
-				logger.Error().Err(err).Str("crawling_id", crawlingID).Msg("dequeue error")
-				continue
-			}
-
-			if task == nil {
-				// Queue might be empty - check if job should complete
-				p.checkJobCompletion(ctx, crawlingID)
-				continue
-			}
-
-			// Process the task
+			metrics.WorkerIdleGauge.Dec()
 			p.activeWorkers.Add(1)
 			metrics.WorkerActiveGauge.Set(float64(p.activeWorkers.Load()))
 
-			p.processTask(ctx, crawlingID, task)
+			p.processTask(ctx, dt.crawlingID, dt.task)
 
 			p.activeWorkers.Add(-1)
 			metrics.WorkerActiveGauge.Set(float64(p.activeWorkers.Load()))
-			processed = true
-		}
-
-		if !processed {
-			sleepCtx(ctx, p.cfg.WorkerPollInterval)
+			metrics.WorkerIdleGauge.Inc()
 		}
 	}
 }
