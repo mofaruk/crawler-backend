@@ -734,6 +734,42 @@ func (h *Handler) ListCrawlings(c *gin.Context) {
 	})
 }
 
+// POST /crawlings/prune — delete a site's finished rounds older than a cutoff
+// (and their results/URLs/failures). Drives the dashboard's package-based data
+// retention; the dashboard supplies the per-package cutoff.
+func (h *Handler) PruneCrawlings(c *gin.Context) {
+	var req models.PruneCrawlingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error(), Code: "INVALID_REQUEST"})
+		return
+	}
+
+	siteID, err := primitive.ObjectIDFromHex(req.SiteID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site_id", Code: "INVALID_ID"})
+		return
+	}
+
+	before, err := time.Parse(time.RFC3339, req.Before)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid before timestamp, want RFC3339", Code: "INVALID_REQUEST"})
+		return
+	}
+
+	deleted, err := h.repo.PruneCrawlingsBefore(c.Request.Context(), siteID, before)
+	if err != nil {
+		log.Error().Err(err).Str("site_id", req.SiteID).Msg("failed to prune crawlings")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to prune crawlings"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"site_id":           req.SiteID,
+		"before":            before.UTC().Format(time.RFC3339),
+		"deleted_crawlings": deleted,
+	})
+}
+
 // GET /crawlings/:id
 func (h *Handler) GetCrawling(c *gin.Context) {
 	oid, err := primitive.ObjectIDFromHex(c.Param("id"))

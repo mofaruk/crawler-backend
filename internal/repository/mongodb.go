@@ -81,6 +81,11 @@ func (r *MongoRepository) ensureIndexes(ctx context.Context) error {
 	// crawlings indexes
 	_, err = r.crawlings().Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "site_id", Value: 1}, {Key: "status", Value: 1}}},
+		// Serves the common "crawlings for a site, newest first" query
+		// (GET /crawlings?site_id=…) fully from the index — match on site_id
+		// and the created_at sort both come from this one index, so no
+		// in-memory sort of the (unbounded, continuous) per-site history.
+		{Keys: bson.D{{Key: "site_id", Value: 1}, {Key: "created_at", Value: -1}}},
 		{Keys: bson.D{{Key: "status", Value: 1}}},
 		{Keys: bson.D{{Key: "created_at", Value: -1}}},
 	})
@@ -283,7 +288,19 @@ func (r *MongoRepository) SetCrawlingError(ctx context.Context, id primitive.Obj
 }
 
 func (r *MongoRepository) ListCrawlings(ctx context.Context, filter bson.M, skip, limit int64) ([]models.Crawling, int64, error) {
-	total, err := r.crawlings().CountDocuments(ctx, filter)
+	// Total count. An empty filter means "all crawlings": use the O(1) metadata
+	// count rather than CountDocuments, which scans the whole collection and so
+	// scales with its (unbounded, continuous-crawling) size. CountDocuments is
+	// still used for filtered queries, where it rides the matching index.
+	var (
+		total int64
+		err   error
+	)
+	if len(filter) == 0 {
+		total, err = r.crawlings().EstimatedDocumentCount(ctx)
+	} else {
+		total, err = r.crawlings().CountDocuments(ctx, filter)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -562,4 +579,60 @@ func (r *MongoRepository) DeleteCrawlData(ctx context.Context, crawlingID primit
 		return err
 	}
 	return nil
+}
+
+// PruneCrawlingsBefore deletes a site's finished crawl rounds created before
+// `before`, cascading to their crawl_urls, crawling_results and crawl_failures.
+// Only terminal rounds (completed/stopped/failed) are eligible — an in-flight
+// round (pending/discovering/running/paused) is never touched, even if old.
+// Returns the number of crawlings deleted. Drives package-based data retention.
+func (r *MongoRepository) PruneCrawlingsBefore(ctx context.Context, siteID primitive.ObjectID, before time.Time) (int64, error) {
+	filter := bson.M{
+		"site_id":    siteID,
+		"created_at": bson.M{"$lt": before},
+		"status": bson.M{"$in": bson.A{
+			models.CrawlStatusCompleted,
+			models.CrawlStatusStopped,
+			models.CrawlStatusFailed,
+		}},
+	}
+
+	// Collect the matching crawling ids (only _id needed).
+	cursor, err := r.crawlings().Find(ctx, filter, options.Find().SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return 0, err
+	}
+	var docs []struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	if err := cursor.All(ctx, &docs); err != nil {
+		return 0, err
+	}
+	if len(docs) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]primitive.ObjectID, len(docs))
+	for i, d := range docs {
+		ids[i] = d.ID
+	}
+
+	// Cascade-delete dependent data first (rides the crawling_id index on each
+	// collection), then the crawlings themselves.
+	child := bson.M{"crawling_id": bson.M{"$in": ids}}
+	if _, err := r.crawlURLs().DeleteMany(ctx, child); err != nil {
+		return 0, err
+	}
+	if _, err := r.crawlingResults().DeleteMany(ctx, child); err != nil {
+		return 0, err
+	}
+	if _, err := r.crawlFailures().DeleteMany(ctx, child); err != nil {
+		return 0, err
+	}
+
+	res, err := r.crawlings().DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	if err != nil {
+		return 0, err
+	}
+	return res.DeletedCount, nil
 }

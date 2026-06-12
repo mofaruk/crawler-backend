@@ -167,6 +167,14 @@ type StartCrawlingRequest struct {
 	URLType      string `json:"url_type" binding:"omitempty,oneof=all static dynamic"`
 }
 
+// PruneCrawlingsRequest purges a site's finished crawl rounds (and their
+// results/URLs/failures) created before the given cutoff. Used by the
+// dashboard's package-driven data-retention job. Before is RFC3339.
+type PruneCrawlingsRequest struct {
+	SiteID string `json:"site_id" binding:"required"`
+	Before string `json:"before" binding:"required"`
+}
+
 type CrawlProgressResponse struct {
 	ID          string      `json:"id"`
 	SiteID      string      `json:"site_id"`

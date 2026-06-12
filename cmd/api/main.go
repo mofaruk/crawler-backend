@@ -91,6 +91,7 @@ func main() {
 
 	// Crawlings
 	router.POST("/crawlings/start", handler.StartCrawling)
+	router.POST("/crawlings/prune", handler.PruneCrawlings)
 	router.GET("/crawlings", handler.ListCrawlings)
 	router.GET("/crawlings/:id", handler.GetCrawling)
 	router.POST("/crawlings/:id/pause", handler.PauseCrawling)
