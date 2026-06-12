@@ -335,21 +335,39 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 
 	// --- Static-source (CSV / XML) path ---
 
-	logger.Info().Str("source", site.URLSource).Msg("fetching URL source")
-	urls, err := h.parser.ParseURLs(ctx, site.URLSource, site.URLSourceType, site.UserAgent, site.URLLimit)
+	logger.Info().
+		Str("source", site.URLSource).
+		Str("source_type", site.URLSourceType).
+		Int("url_limit", site.URLLimit).
+		Msg("fetching URL source")
+
+	urls, stats, err := h.parser.ParseURLs(ctx, site.URLSource, site.URLSourceType, site.UserAgent, site.URLLimit)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to parse URL source")
-		_ = h.repo.SetCrawlingError(ctx, oid, "failed to parse URL source: "+err.Error())
+		logger.Error().Err(err).Interface("parse_stats", stats).Msg("failed to parse URL source")
+		msg := "failed to parse URL source: " + err.Error()
+		if stats != nil {
+			if d := stats.Diagnosis(); d != "" && !strings.Contains(msg, d) {
+				msg += " (" + d + ")"
+			}
+		}
+		_ = h.repo.SetCrawlingError(ctx, oid, msg)
 		return
 	}
 
 	if len(urls) == 0 {
-		logger.Warn().Msg("no URLs found in source")
-		_ = h.repo.SetCrawlingError(ctx, oid, "no URLs found in source")
+		diagnosis := stats.Diagnosis()
+		logger.Warn().
+			Interface("parse_stats", stats).
+			Str("diagnosis", diagnosis).
+			Msg("no URLs found in source")
+		_ = h.repo.SetCrawlingError(ctx, oid, "no URLs found in source — "+diagnosis)
 		return
 	}
 
-	logger.Info().Int("url_count", len(urls)).Msg("URLs parsed from source")
+	logger.Info().
+		Int("url_count", len(urls)).
+		Interface("parse_stats", stats).
+		Msg("URLs parsed from source")
 
 	// Provisional total — corrected at the end to reflect what actually
 	// passed the type filter and dedup.
