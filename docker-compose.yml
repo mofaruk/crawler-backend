@@ -26,10 +26,6 @@ services:
     restart: unless-stopped
     networks:
       - crawler-net
-      # Shared cross-stack network so the Laravel dashboard (a separate Coolify
-      # resource) can reach the API in-cluster as http://crawler_api:8080,
-      # instead of hair-pinning out through Cloudflare (backend.cachecrawler.net).
-      - crawler-backend-net
 
   # --- Worker Service (scalable) ---
   crawler_worker:
@@ -147,7 +143,3 @@ volumes:
 networks:
   crawler-net:
     driver: bridge
-  # Pre-existing shared bridge that bridges this stack to the dashboard stack.
-  # Create once on the host (idempotent): docker network create crawler-backend-net
-  crawler-backend-net:
-    external: true
