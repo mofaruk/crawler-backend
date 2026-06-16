@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"golang.org/x/net/html/charset"
 )
 
 // URLParser fetches and parses URL sources (CSV or XML sitemaps).
@@ -59,6 +60,7 @@ type ParseStats struct {
 	XMLDepthReached    int    `json:"xml_depth_reached,omitempty"`
 	XMLGzipDecoded     bool   `json:"xml_gzip_decoded,omitempty"`
 	XMLLocEntries      int    `json:"xml_loc_entries,omitempty"` // total <url><loc> observed across all docs
+	XMLParseError      string `json:"xml_parse_error,omitempty"` // first non-EOF decoder error on the root document
 
 	// Common — apply to both CSV first-column URLs and XML <loc>s.
 	URLsAccepted        int `json:"urls_accepted"`
@@ -105,6 +107,12 @@ func (s *ParseStats) Diagnosis() string {
 	case "xml":
 		switch {
 		case s.XMLFormat == "" || s.XMLFormat == "unknown":
+			if s.XMLParseError != "" {
+				return fmt.Sprintf(
+					"XML: parsing aborted after %d byte(s): %s",
+					s.ContentBytes, s.XMLParseError,
+				)
+			}
 			return fmt.Sprintf(
 				"XML: parsed %d byte(s) but found no <urlset> or <sitemapindex> elements (check it is a valid sitemap, not HTML or a different format)",
 				s.ContentBytes,
@@ -318,6 +326,12 @@ func (p *URLParser) parseSitemap(ctx context.Context, target, userAgent string, 
 	var urls, children []string
 	docFormat := "" // "urlset" / "sitemapindex" / mixed if both seen
 	decoder := xml.NewDecoder(reader)
+	// Transcode sitemaps that declare a legacy charset (e.g. ISO-8859-1,
+	// windows-1252) to UTF-8. Without this, xml.Decoder.Token() errors on the
+	// <?xml encoding=...?> declaration *before* reaching <urlset>, which the
+	// loop below would otherwise swallow as a "no sitemap found" empty result.
+	decoder.CharsetReader = charset.NewReaderLabel
+	var parseErr error
 	for {
 		if limit > 0 && len(urls) >= limit {
 			stats.LimitReached = true
@@ -325,6 +339,9 @@ func (p *URLParser) parseSitemap(ctx context.Context, target, userAgent string, 
 		}
 		token, err := decoder.Token()
 		if err != nil { // io.EOF or malformed tail — stop with what we have
+			if err != io.EOF {
+				parseErr = err
+			}
 			break
 		}
 		se, ok := token.(xml.StartElement)
@@ -381,6 +398,12 @@ func (p *URLParser) parseSitemap(ctx context.Context, target, userAgent string, 
 		stats.XMLFormat = docFormat
 		if stats.XMLFormat == "" {
 			stats.XMLFormat = "unknown"
+		}
+		// Only surface the decoder error when it actually prevented us from
+		// recognising the document; a malformed tail after a valid <urlset>
+		// still yields URLs and shouldn't be reported as a failure.
+		if parseErr != nil && len(urls) == 0 && len(children) == 0 {
+			stats.XMLParseError = parseErr.Error()
 		}
 	}
 
