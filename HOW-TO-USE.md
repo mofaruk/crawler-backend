@@ -655,4 +655,4 @@ docker compose up --build -d
 
 ## Postman Collection
 
-Import the file `postman/crawler-backend.postman_collection.json` into Postman for a ready-to-use collection with all endpoints, example bodies, and variables.
+Import the file `postman/crawler-backend.postman_collection.json` into Postman for a ready-to-use collection with all endpoints, example bodies, and variables.   
