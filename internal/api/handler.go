@@ -1348,3 +1348,69 @@ func parseDay(raw string) (time.Time, error) {
 	}
 	return time.Parse(time.RFC3339, raw)
 }
+
+// --- Sitemap Discovery ---
+
+type discoverSitemapRequest struct {
+	BaseURL   string `json:"base_url" binding:"required"`
+	UserAgent string `json:"user_agent"`
+}
+
+// DiscoverSitemap finds a site's sitemap so the customer does not have to know
+// where it lives. It is a read-only probe: nothing is stored, and the caller
+// decides whether to use what comes back.
+//
+// The URL is normalised before validation because customers type bare domains
+// ("billigfilter.dk"), not full URLs.
+func (h *Handler) DiscoverSitemap(c *gin.Context) {
+	var req discoverSitemapRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	normalised, err := source.NormalizeSiteURL(req.BaseURL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// The same guard every other user-supplied target goes through: without it
+	// this endpoint would fetch arbitrary internal addresses on request.
+	if err := source.ValidateTargetURL(normalised, h.cfg.AllowPrivateTargets); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	userAgent := strings.TrimSpace(req.UserAgent)
+	if userAgent == "" {
+		userAgent = h.cfg.DefaultUserAgent
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	candidates, err := h.parser.FindSitemaps(ctx, normalised, userAgent, h.cfg.AllowPrivateTargets)
+	if err != nil {
+		log.Error().Err(err).Str("base_url", normalised).Msg("sitemap discovery failed")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "could not reach the site"})
+		return
+	}
+
+	// Report the winner separately so the caller does not have to re-derive it
+	// from the candidate list.
+	var best *source.SitemapCandidate
+	for i := range candidates {
+		if candidates[i].Found && candidates[i].URLCount > 0 {
+			best = &candidates[i]
+			break
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"base_url":   normalised,
+		"found":      best != nil,
+		"sitemap":    best,
+		"candidates": candidates,
+	})
+}

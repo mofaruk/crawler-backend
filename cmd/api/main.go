@@ -102,6 +102,10 @@ func main() {
 	router.PUT("/sites/:id", handler.UpdateSite)
 	router.DELETE("/sites/:id", handler.DeleteSite)
 
+	// Read-only probe used by the dashboard's create-site form. Stores
+	// nothing; the caller decides whether to use what comes back.
+	router.POST("/sitemap/discover", handler.DiscoverSitemap)
+
 	// Crawlings
 	router.POST("/crawlings/start", handler.StartCrawling)
 	router.POST("/crawlings/prune", handler.PruneCrawlings)

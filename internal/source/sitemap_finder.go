@@ -12,20 +12,16 @@ import (
 
 // candidatePaths are the sitemap locations worth trying, most likely first.
 //
-// The ordering matters: WordPress is the common case for this product's
-// customers, and since 5.5 core serves /wp-sitemap.xml. Yoast and RankMath
-// (the two dominant SEO plugins) both serve /sitemap_index.xml, which usually
-// also exists as /sitemap.xml via a redirect — trying the index first avoids
-// following that hop.
+// Deliberately short. Customers of this product are overwhelmingly WordPress,
+// and between Yoast/RankMath's index and WP core's own sitemap these cover
+// effectively all of them. A longer list would mean more requests against a
+// customer's origin on every probe to catch cases that do not occur in
+// practice — and robots.txt already handles any genuinely non-standard
+// location, authoritatively, before this list is reached.
 var candidatePaths = []string{
-	"/sitemap_index.xml", // Yoast, RankMath
+	"/sitemap_index.xml", // Yoast, RankMath — the common case
 	"/wp-sitemap.xml",    // WordPress core 5.5+
-	"/sitemap.xml",       // the generic default
-	"/sitemap-index.xml",
-	"/sitemap/sitemap.xml",
-	"/sitemap1.xml",
-	"/post-sitemap.xml", // Yoast without an index
-	"/page-sitemap.xml",
+	"/sitemap.xml",       // generic fallback, and what most other CMSes use
 }
 
 // SitemapCandidate is one location that was tried.
@@ -48,8 +44,10 @@ type SitemapCandidate struct {
 // Every candidate is fetched and parsed rather than merely HEAD-checked: many
 // hosts answer 200 with an HTML error page for a missing .xml, and a
 // soft-404 would otherwise be reported as a working sitemap.
-func (p *URLParser) FindSitemaps(ctx context.Context, baseURL, userAgent string) ([]SitemapCandidate, error) {
-	if err := ValidateTargetURL(baseURL, true); err != nil {
+// allowPrivate is passed in rather than assumed: hardcoding it would mean a
+// caller that correctly rejected a private target still had it fetched here.
+func (p *URLParser) FindSitemaps(ctx context.Context, baseURL, userAgent string, allowPrivate bool) ([]SitemapCandidate, error) {
+	if err := ValidateTargetURL(baseURL, allowPrivate); err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 
