@@ -1463,3 +1463,58 @@ func (h *Handler) DiscoverSitemap(c *gin.Context) {
 		"candidates": candidates,
 	})
 }
+
+// --- Live Feed ---
+
+// TailCrawledURLs streams what a running crawl has just checked.
+//
+// Kept deliberately small: the caller polls with the last id it saw and gets
+// only what has landed since, so a long-running crawl does not re-send its
+// whole history on every poll.
+func (h *Handler) TailCrawledURLs(c *gin.Context) {
+	oid, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid crawling ID", Code: "INVALID_ID"})
+		return
+	}
+
+	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	var after primitive.ObjectID
+	if raw := c.Query("after"); raw != "" {
+		parsed, err := primitive.ObjectIDFromHex(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid after cursor", Code: "INVALID_CURSOR"})
+			return
+		}
+		after = parsed
+	}
+
+	results, err := h.repo.TailCrawlingResults(c.Request.Context(), oid, after, limit)
+	if err != nil {
+		log.Error().Err(err).Str("crawling_id", c.Param("id")).Msg("failed to tail crawl results")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read results", Code: "INTERNAL"})
+		return
+	}
+
+	// The caller polls with this rather than tracking ids itself.
+	cursor := c.Query("after")
+	if len(results) > 0 {
+		cursor = results[len(results)-1].ID.Hex()
+	}
+
+	crawling, err := h.repo.GetCrawling(c.Request.Context(), oid)
+	status := ""
+	if err == nil && crawling != nil {
+		status = string(crawling.Status)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":   results,
+		"cursor": cursor,
+		"status": status,
+	})
+}

@@ -990,3 +990,66 @@ func (r *MongoRepository) CarryForwardResults(
 
 	return err
 }
+
+// TailCrawlingResults returns results newer than the given id, oldest first.
+//
+// The live feed polls with the newest id it has already shown, so each call
+// returns only what has landed since. Passing a zero cursor returns the most
+// recent `limit` rows so a viewer arriving mid-crawl sees context rather than
+// an empty panel.
+//
+// ObjectIDs carry a timestamp prefix and rise monotonically per process, so
+// "_id greater than" is a usable stand-in for "inserted after" here without a
+// separate sequence.
+func (r *MongoRepository) TailCrawlingResults(
+	ctx context.Context,
+	crawlingID primitive.ObjectID,
+	after primitive.ObjectID,
+	limit int64,
+) ([]models.CrawlingResult, error) {
+	filter := bson.M{"crawling_id": crawlingID}
+
+	if after.IsZero() {
+		// First poll: hand back the newest rows, then reverse so the caller
+		// still receives them oldest-first like every later poll.
+		opts := options.Find().
+			SetLimit(limit).
+			SetSort(bson.D{{Key: "_id", Value: -1}})
+
+		cur, err := r.crawlingResults().Find(ctx, filter, opts)
+		if err != nil {
+			return nil, err
+		}
+		defer cur.Close(ctx)
+
+		var newest []models.CrawlingResult
+		if err := cur.All(ctx, &newest); err != nil {
+			return nil, err
+		}
+
+		for i, j := 0, len(newest)-1; i < j; i, j = i+1, j-1 {
+			newest[i], newest[j] = newest[j], newest[i]
+		}
+
+		return newest, nil
+	}
+
+	filter["_id"] = bson.M{"$gt": after}
+
+	opts := options.Find().
+		SetLimit(limit).
+		SetSort(bson.D{{Key: "_id", Value: 1}})
+
+	cur, err := r.crawlingResults().Find(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var results []models.CrawlingResult
+	if err := cur.All(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}

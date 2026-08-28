@@ -120,6 +120,7 @@ func main() {
 	router.GET("/crawlings/:id/results/analytics", handler.GetHeaderAnalytics)
 	router.GET("/crawlings/:id/status-analytics", handler.GetCrawlingStatusAnalytics)
 	router.GET("/crawlings/:id/urls", handler.ListCrawledURLs)
+	router.GET("/crawlings/:id/urls/tail", handler.TailCrawledURLs)
 	router.GET("/crawlings/:id/urls/export", handler.ExportCrawledURLs)
 
 	// --- Metrics Server ---
