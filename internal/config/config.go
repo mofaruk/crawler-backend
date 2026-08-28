@@ -66,6 +66,25 @@ type Config struct {
 // serve different cache behaviour — or block outright — for unrecognised bot
 // agents, which would make the extracted cache headers misrepresent what a
 // real visitor receives. Override per-site, or via DEFAULT_USER_AGENT.
+// envBool reads a boolean the way deploy files actually write them. An exact
+// "true" match meant TRUE, True, 1 and yes all silently left the SSRF guard on
+// — safe, but confusing to debug when the bypass is genuinely wanted.
+//
+// Anything unrecognised keeps the default, so a typo never turns protection
+// off by accident.
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "":
+		return def
+	case "true", "1", "yes", "on":
+		return true
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return def
+	}
+}
+
 const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
 func Load() *Config {
@@ -100,7 +119,7 @@ func Load() *Config {
 
 		APIKey:              envStr("API_KEY", ""),
 		AllowedOrigins:      splitAndTrim(envStr("ALLOWED_ORIGINS", "")),
-		AllowPrivateTargets: envStr("ALLOW_PRIVATE_TARGETS", "") == "true",
+		AllowPrivateTargets: envBool("ALLOW_PRIVATE_TARGETS", false),
 
 		LogLevel: strings.ToLower(envStr("LOG_LEVEL", "info")),
 	}

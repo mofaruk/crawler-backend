@@ -3,6 +3,7 @@ package crawler
 import (
 	"io"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -35,7 +36,7 @@ type PageSignals struct {
 // text produced false positives on pages that merely *discuss* 404s, and the
 // title is where a real error page announces itself.
 var softNotFoundPhrases = []string{
-	"404", "not found", "page not found", "page doesn't exist",
+	"not found", "page not found", "page doesn't exist",
 	"page does not exist", "ikke fundet", "siden findes ikke",
 }
 
@@ -49,6 +50,10 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 	var (
 		inTitle bool
 		inBody  bool
+		// Script and style bodies are text tokens too. Counting them lets an
+		// inline analytics blob or a JSON-LD block push an otherwise empty page
+		// past the thin-content threshold, so the page never gets reported.
+		inScript bool
 		words   int
 	)
 
@@ -66,7 +71,7 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 			if inTitle && text != "" {
 				s.Title = strings.Join(strings.Fields(text), " ")
 			}
-			if inBody && text != "" {
+			if inBody && !inScript && text != "" {
 				words += len(strings.Fields(text))
 			}
 
@@ -79,6 +84,8 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 				inTitle = true
 			case "body":
 				inBody = true
+			case "script", "style", "noscript", "template":
+				inScript = true
 			case "h1":
 				s.H1Count++
 			}
@@ -127,8 +134,11 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 
 		case html.EndTagToken:
 			nameBytes, _ := z.TagName()
-			if string(nameBytes) == "title" {
+			switch string(nameBytes) {
+			case "title":
 				inTitle = false
+			case "script", "style", "noscript", "template":
+				inScript = false
 			}
 		}
 	}
@@ -144,5 +154,25 @@ func looksLikeNotFound(title string) bool {
 			return true
 		}
 	}
+
+	// A bare "404" is only taken as an error page when the title is short and
+	// mostly consists of it. This is a critical-severity finding, and titles
+	// like "Filter model 404" or "Ventilation 4045 spare part" are product
+	// names, not errors — a real error page announces itself in a few words
+	// ("404", "Error 404", "404 | Site").
+	words := strings.FieldsFunc(t, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+
+	if len(words) > 3 {
+		return false
+	}
+
+	for _, w := range words {
+		if w == "404" {
+			return true
+		}
+	}
+
 	return false
 }

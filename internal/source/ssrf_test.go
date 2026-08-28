@@ -41,3 +41,41 @@ func TestAllowPrivateBypassesTheCheck(t *testing.T) {
 		t.Fatalf("allowPrivate should bypass validation, got %v", err)
 	}
 }
+
+// ALLOW_PRIVATE_TARGETS lets local development reach fixtures on
+// host.docker.internal. It must not become a blanket "skip validation":
+// before this was split out, `javascript:alert(1)` was accepted and stored as
+// a site's base_url whenever the flag was on.
+func TestAllowPrivateStillRejectsNonHTTPSchemes(t *testing.T) {
+	rejected := []string{
+		"javascript:alert(1)",
+		"data:text/html,<script>alert(1)</script>",
+		"file:///etc/passwd",
+		"ftp://example.dk/pub",
+		"gopher://example.dk",
+		"",
+		"not a url at all",
+	}
+
+	for _, raw := range rejected {
+		if err := ValidateTargetURL(raw, true); err == nil {
+			t.Errorf("ValidateTargetURL(%q, allowPrivate=true) = nil, want rejection", raw)
+		}
+	}
+}
+
+// The flag must still do its job: a private address is allowed through when
+// it is set, which is the whole reason it exists.
+func TestAllowPrivatePermitsPrivateAddresses(t *testing.T) {
+	allowed := []string{
+		"http://host.docker.internal:9999/sitemap.xml",
+		"http://127.0.0.1:9999",
+		"http://192.168.1.10",
+	}
+
+	for _, raw := range allowed {
+		if err := ValidateTargetURL(raw, true); err != nil {
+			t.Errorf("ValidateTargetURL(%q, allowPrivate=true) = %v, want nil", raw, err)
+		}
+	}
+}

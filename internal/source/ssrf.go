@@ -23,10 +23,6 @@ import (
 // allowPrivate short-circuits the whole check for local development, where
 // sources legitimately live on host.docker.internal.
 func ValidateTargetURL(raw string, allowPrivate bool) error {
-	if allowPrivate {
-		return nil
-	}
-
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -38,6 +34,14 @@ func ValidateTargetURL(raw string, allowPrivate bool) error {
 	host := u.Hostname()
 	if host == "" {
 		return fmt.Errorf("URL has no host")
+	}
+
+	// ALLOW_PRIVATE_TARGETS exists so local development can crawl fixtures on
+	// host.docker.internal. It permits private *addresses* — it must not
+	// disable scheme and host validation, or "javascript:alert(1)" is accepted
+	// and stored as a site's base_url.
+	if allowPrivate {
+		return nil
 	}
 
 	ips, err := net.LookupIP(host)

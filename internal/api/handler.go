@@ -1363,6 +1363,14 @@ func resolveWindow(c *gin.Context, defaultDays, maxDays int) (since, until time.
 	if fromRaw != "" {
 		if t, err := parseDay(fromRaw); err == nil {
 			since = t
+
+			// A `from` with no usable `to` means "that day onwards, up to
+			// today". Anchoring the end to the start of tomorrow rather than
+			// leaving it at time.Now() keeps the window a whole number of days
+			// and stops a saved link from silently widening every time it is
+			// opened.
+			until = parseDayOf(now).AddDate(0, 0, 1)
+
 			if toRaw != "" {
 				if u, err := parseDay(toRaw); err == nil {
 					// Inclusive end: advance to the start of the next day.
@@ -1372,7 +1380,11 @@ func resolveWindow(c *gin.Context, defaultDays, maxDays int) (since, until time.
 			if until.Before(since) {
 				since, until = until, since
 			}
-			return since, until, int(until.Sub(since).Hours()/24) + 1
+
+			// until is already the start of the day *after* the range, so the
+			// difference is the day count — adding one more would report a
+			// single-day window as two days.
+			return since, until, int(until.Sub(since).Hours() / 24)
 		}
 	}
 
@@ -1396,6 +1408,15 @@ func parseDay(raw string) (time.Time, error) {
 		return t.UTC(), nil
 	}
 	return time.Parse(time.RFC3339, raw)
+}
+
+// parseDayOf truncates a timestamp to the start of its UTC day, so a window
+// built from it covers whole days rather than a partial one ending at whatever
+// time the request happened to arrive.
+func parseDayOf(t time.Time) time.Time {
+	u := t.UTC()
+
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // --- Sitemap Discovery ---
