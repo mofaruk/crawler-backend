@@ -54,6 +54,8 @@ func (q *DistributedQueue) EnqueueBatch(ctx context.Context, crawlingID string, 
 			log.Error().Err(err).Str("url", task.URL).Msg("failed to marshal task")
 			continue
 		}
+		// LPUSH pairs with the RPOP in Dequeue: push at the head, pop from
+		// the tail, so the queue drains FIFO.
 		pipe.LPush(ctx, key, data)
 	}
 
@@ -157,7 +159,12 @@ func (q *DistributedQueue) Ack(ctx context.Context, crawlingID string, task *mod
 // --- Retry ---
 
 // Retry moves a failed task to the retry queue with exponential backoff.
-func (q *DistributedQueue) Retry(ctx context.Context, crawlingID string, task *models.CrawlTask) error {
+//
+// Returns dead=true when the task has exhausted MaxRetries and was moved to
+// the dead-letter queue instead of being rescheduled. Callers use this to
+// count a URL as failed exactly once, at the end of its retry chain, rather
+// than on every attempt.
+func (q *DistributedQueue) Retry(ctx context.Context, crawlingID string, task *models.CrawlTask) (dead bool, err error) {
 	// Remove from processing
 	origData, _ := json.Marshal(task)
 	q.rdb.ZRem(ctx, processingKey(crawlingID), origData)
@@ -165,7 +172,7 @@ func (q *DistributedQueue) Retry(ctx context.Context, crawlingID string, task *m
 	task.Retries++
 
 	if task.Retries > task.MaxRetries {
-		return q.SendToDead(ctx, crawlingID, task)
+		return true, q.SendToDead(ctx, crawlingID, task)
 	}
 
 	// Exponential backoff: 2^retries seconds, max 300s
@@ -177,10 +184,10 @@ func (q *DistributedQueue) Retry(ctx context.Context, crawlingID string, task *m
 
 	data, err := json.Marshal(task)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	return q.rdb.ZAdd(ctx, retryKey(crawlingID), redis.Z{
+	return false, q.rdb.ZAdd(ctx, retryKey(crawlingID), redis.Z{
 		Score:  float64(retryAt.Unix()),
 		Member: data,
 	}).Err()
@@ -209,8 +216,11 @@ local tasks = redis.call('ZRANGEBYSCORE', retry_key, '-inf', now, 'LIMIT', 0, ma
 if #tasks > 0 then
     for _, task in ipairs(tasks) do
         redis.call('LPUSH', pending_key, task)
+        -- Remove exactly the member we moved. ZREMRANGEBYSCORE would delete
+        -- every member below the cutoff, including the ones beyond LIMIT that
+        -- we never requeued — silently losing them.
+        redis.call('ZREM', retry_key, task)
     end
-    redis.call('ZREMRANGEBYSCORE', retry_key, '-inf', now)
 end
 return #tasks
 `)
@@ -237,9 +247,10 @@ local max = tonumber(ARGV[2])
 local tasks = redis.call('ZRANGEBYSCORE', processing_key, '-inf', cutoff, 'LIMIT', 0, max)
 if #tasks > 0 then
     for _, task in ipairs(tasks) do
+        -- Per-member ZREM, for the same reason as requeueRetryScript.
         redis.call('LPUSH', pending_key, task)
+        redis.call('ZREM', processing_key, task)
     end
-    redis.call('ZREMRANGEBYSCORE', processing_key, '-inf', cutoff)
 end
 return #tasks
 `)
@@ -314,4 +325,10 @@ func (q *DistributedQueue) PendingLen(ctx context.Context, crawlingID string) (i
 		return 0, nil
 	}
 	return n, err
+}
+
+// marshalTask exposes the queue's task encoding for tests that need to seed
+// Redis structures directly.
+func marshalTask(task models.CrawlTask) ([]byte, error) {
+	return json.Marshal(task)
 }

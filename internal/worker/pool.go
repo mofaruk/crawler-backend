@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
@@ -290,15 +291,8 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 	if result.Error != nil {
 		logger.Warn().Err(result.Error).Msg("fetch failed")
 		metrics.CrawlErrorsTotal.WithLabelValues(crawlingID, "fetch_error").Inc()
-		metrics.URLsCrawledTotal.WithLabelValues(crawlingID, "failed").Inc()
 
-		// Retry the task
-		if err := p.queue.Retry(ctx, crawlingID, task); err != nil {
-			logger.Error().Err(err).Msg("failed to retry task")
-		}
-
-		// Update progress
-		_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 0, 1)
+		p.recordAttemptFailure(ctx, logger, crawlingID, task, result.Error.Error(), 0)
 		return
 	}
 
@@ -307,12 +301,9 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 	// Check for server errors (retry-worthy)
 	if result.StatusCode >= 500 {
 		metrics.CrawlErrorsTotal.WithLabelValues(crawlingID, "server_error").Inc()
-		metrics.URLsCrawledTotal.WithLabelValues(crawlingID, "failed").Inc()
 
-		if err := p.queue.Retry(ctx, crawlingID, task); err != nil {
-			logger.Error().Err(err).Msg("failed to retry task")
-		}
-		_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 0, 1)
+		p.recordAttemptFailure(ctx, logger, crawlingID, task,
+			fmt.Sprintf("server returned HTTP %d", result.StatusCode), result.StatusCode)
 		return
 	}
 
@@ -342,6 +333,47 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 
 	// Update progress
 	_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 1, 0)
+}
+
+// recordAttemptFailure handles one failed fetch attempt: it reschedules the
+// task and, only once the retry chain is exhausted, counts the URL as failed
+// and persists a CrawlFailure row.
+//
+// Counting on every attempt (the previous behaviour) inflated failed_urls by
+// up to MaxRetries+1 per dead URL, pushing crawled+failed past total_urls and
+// progress past 100%.
+func (p *Pool) recordAttemptFailure(
+	ctx context.Context,
+	logger zerolog.Logger,
+	crawlingID string,
+	task *models.CrawlTask,
+	errMsg string,
+	statusCode int,
+) {
+	dead, err := p.queue.Retry(ctx, crawlingID, task)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retry task")
+	}
+	if !dead {
+		// Still has attempts left — not a failure yet.
+		return
+	}
+
+	metrics.URLsCrawledTotal.WithLabelValues(crawlingID, "failed").Inc()
+	_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 0, 1)
+
+	// Persist the failure so GET /crawlings/:id/failures can report it.
+	if err := p.repo.InsertCrawlFailure(ctx, &models.CrawlFailure{
+		CrawlingID: mustObjectID(crawlingID),
+		SiteID:     mustObjectID(task.SiteID),
+		URL:        task.URL,
+		Error:      errMsg,
+		StatusCode: statusCode,
+		Retries:    task.Retries,
+		FailedAt:   time.Now(),
+	}); err != nil {
+		logger.Error().Err(err).Msg("failed to store crawl failure")
+	}
 }
 
 // checkJobCompletion checks if a crawling job has finished all its work.
