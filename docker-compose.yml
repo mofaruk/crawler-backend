@@ -17,7 +17,7 @@ services:
       - REDIS_ADDR=crawler_redis:6379
       - LOG_LEVEL=info
       - CRAWLER_MAX_RETRIES=3
-      - DEFAULT_USER_AGENT=WK-Crawler/1.0
+      - DEFAULT_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
     depends_on:
       crawler_redis:
         condition: service_healthy
@@ -44,7 +44,7 @@ services:
       - WORKER_BATCH_SIZE=50
       - CRAWLER_TIMEOUT=30s
       - CRAWLER_MAX_RETRIES=3
-      - DEFAULT_USER_AGENT=WK-Crawler/1.0
+      - DEFAULT_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
       - LOG_LEVEL=info
     depends_on:
       crawler_redis:

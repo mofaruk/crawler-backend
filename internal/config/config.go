@@ -49,6 +49,12 @@ type Config struct {
 	LogLevel string
 }
 
+// defaultUserAgent impersonates a current Chrome build. CDNs and WAFs often
+// serve different cache behaviour — or block outright — for unrecognised bot
+// agents, which would make the extracted cache headers misrepresent what a
+// real visitor receives. Override per-site, or via DEFAULT_USER_AGENT.
+const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+
 func Load() *Config {
 	return &Config{
 		ServiceName: envStr("SERVICE_NAME", "crawler-backend"),
@@ -70,7 +76,7 @@ func Load() *Config {
 
 		CrawlerTimeout:    envDuration("CRAWLER_TIMEOUT", 30*time.Second),
 		CrawlerMaxRetries: envInt("CRAWLER_MAX_RETRIES", 3),
-		DefaultUserAgent:  envStr("DEFAULT_USER_AGENT", "WK-Crawler/1.0"),
+		DefaultUserAgent:  envStr("DEFAULT_USER_AGENT", defaultUserAgent),
 
 		RateLimitWindow: envDuration("RATE_LIMIT_WINDOW", 1*time.Second),
 
