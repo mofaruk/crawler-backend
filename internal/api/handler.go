@@ -113,6 +113,7 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		URLSourceType: req.URLSourceType,
 		UserAgent:     userAgent,
 		ExtractData:   extractData,
+		SmartRecrawl:  req.SmartRecrawl,
 	}
 
 	if err := h.repo.CreateSite(c.Request.Context(), site); err != nil {
@@ -215,6 +216,9 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 			}
 		}
 		update["extract_data"] = extractData
+	}
+	if req.SmartRecrawl != nil {
+		update["smart_recrawl"] = *req.SmartRecrawl
 	}
 
 	if len(update) == 0 {
@@ -409,6 +413,23 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		Interface("parse_stats", stats).
 		Msg("URLs parsed from source")
 
+	// Smart recrawl: look up what the previous round found already cached.
+	// Those URLs are skipped below and their results copied forward, so the
+	// report still describes the whole site rather than only what was
+	// re-fetched.
+	cached := map[string]models.CrawlingResult{}
+	if site.SmartRecrawl {
+		found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid)
+		if err != nil {
+			// Not fatal: fall back to crawling everything, which is correct,
+			// just slower than the customer asked for.
+			logger.Error().Err(err).Msg("smart recrawl lookup failed; crawling all URLs")
+		} else {
+			cached = found
+			logger.Info().Int("cached_last_round", len(cached)).Msg("smart recrawl enabled")
+		}
+	}
+
 	// Provisional total — corrected at the end to reflect what actually
 	// passed the type filter and dedup.
 	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, len(urls))
@@ -421,6 +442,7 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 
 	batchSize := 1000
 	totalEnqueued := 0
+	var carryForward []models.CrawlingResult
 
 	for i := 0; i < len(urls); i += batchSize {
 		end := i + batchSize
@@ -440,6 +462,12 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 				continue
 			}
 			if !isNew {
+				continue
+			}
+			// Cached last round: copy that result forward instead of
+			// spending a request re-confirming it.
+			if prev, ok := cached[u]; ok {
+				carryForward = append(carryForward, prev)
 				continue
 			}
 			tasks = append(tasks, models.CrawlTask{
@@ -464,12 +492,33 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		}
 	}
 
-	logger.Info().Int("enqueued", totalEnqueued).Msg("URL ingestion complete")
+	if len(carryForward) > 0 {
+		if err := h.repo.CarryForwardResults(ctx, oid, carryForward); err != nil {
+			logger.Error().Err(err).Int("count", len(carryForward)).Msg("failed to carry results forward")
+		}
+	}
 
-	// Correct total to actual enqueued count (post-filter, post-dedup).
-	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, totalEnqueued)
+	logger.Info().
+		Int("enqueued", totalEnqueued).
+		Int("carried_forward", len(carryForward)).
+		Msg("URL ingestion complete")
+
+	// The total counts carried-forward URLs too: they are part of the report
+	// even though they cost no request, and excluding them would make the
+	// site look like it shrank.
+	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, totalEnqueued+len(carryForward))
 
 	if totalEnqueued == 0 {
+		// Everything was carried forward: nothing to fetch, so the round is
+		// already complete rather than an error.
+		if len(carryForward) > 0 {
+			_ = h.repo.SetCrawlingCrawledURLs(ctx, oid, len(carryForward))
+			_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
+			_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
+			logger.Info().Msg("every URL was still cached; nothing needed fetching")
+			return
+		}
+
 		// Type filter excluded everything (or source was all duplicates).
 		_ = h.repo.SetCrawlingError(ctx, oid, "no URLs passed the url_type filter; nothing to crawl")
 		return

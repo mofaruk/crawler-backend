@@ -50,6 +50,11 @@ type Site struct {
 	URLSourceType string             `bson:"url_source_type" json:"url_source_type"` // "csv" or "xml"
 	UserAgent     string             `bson:"user_agent" json:"user_agent"`
 	ExtractData   []string           `bson:"extract_data" json:"extract_data"` // HTTP header names to extract
+	// SmartRecrawl skips URLs the previous round found already cached, and
+	// carries their last result forward. On a site that is 95% cached this
+	// avoids almost all the work — at the cost of not learning whether those
+	// pages are *still* cached, which is why it is opt-in per site.
+	SmartRecrawl  bool               `bson:"smart_recrawl" json:"smart_recrawl"`
 	CreatedAt     time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt     time.Time          `bson:"updated_at" json:"updated_at"`
 }
@@ -115,6 +120,14 @@ type CrawlingResult struct {
 	RedirectedTo string `bson:"redirected_to,omitempty" json:"redirected_to,omitempty"`
 	// Page holds on-page signals parsed from an HTML body; nil for assets.
 	Page *PageSignals `bson:"page,omitempty" json:"page,omitempty"`
+	// CarriedForward marks a result copied from the previous round rather
+	// than fetched in this one, because smart recrawl skipped the URL. Without
+	// the flag a stale row is indistinguishable from a fresh one.
+	CarriedForward bool `bson:"carried_forward,omitempty" json:"carried_forward,omitempty"`
+	// OriginalCrawledAt is when the carried-forward result was actually
+	// fetched. CrawledAt stays the current round so ordering and windowing
+	// still work.
+	OriginalCrawledAt *time.Time `bson:"original_crawled_at,omitempty" json:"original_crawled_at,omitempty"`
 }
 
 // PageSignals mirrors crawler.PageSignals for storage. Duplicated rather than
@@ -170,6 +183,7 @@ type CreateSiteRequest struct {
 	URLSourceType string `json:"url_source_type" binding:"required,oneof=csv xml auto"`
 	UserAgent     string `json:"user_agent"`
 	ExtractData   string `json:"extract_data"` // comma-separated header names
+	SmartRecrawl  bool   `json:"smart_recrawl"`
 }
 
 type UpdateSiteRequest struct {
@@ -180,6 +194,7 @@ type UpdateSiteRequest struct {
 	URLSourceType *string `json:"url_source_type" binding:"omitempty,oneof=csv xml auto"`
 	UserAgent     *string `json:"user_agent"`
 	ExtractData   *string `json:"extract_data"`
+	SmartRecrawl  *bool   `json:"smart_recrawl"`
 }
 
 type StartCrawlingRequest struct {

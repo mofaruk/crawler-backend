@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -311,6 +312,21 @@ func (r *MongoRepository) SetCrawlingTotalURLs(ctx context.Context, id primitive
 		"$set": bson.M{
 			"total_urls":  total,
 			"updated_at":  time.Now(),
+		},
+	})
+	return err
+}
+
+// SetCrawlingCrawledURLs sets the crawled count directly. Used when a round
+// finishes without fetching anything — every URL was carried forward — so
+// there are no per-URL increments to arrive at the right figure.
+func (r *MongoRepository) SetCrawlingCrawledURLs(ctx context.Context, id primitive.ObjectID, n int) error {
+	now := time.Now()
+	_, err := r.crawlings().UpdateByID(ctx, id, bson.M{
+		"$set": bson.M{
+			"crawled_urls": n,
+			"completed_at": now,
+			"updated_at":   now,
 		},
 	})
 	return err
@@ -882,4 +898,95 @@ func (r *MongoRepository) PruneCrawlingsBefore(ctx context.Context, siteID primi
 		return 0, err
 	}
 	return res.DeletedCount, nil
+}
+
+// CachedResultsFromLastCrawl returns the previous completed round's results
+// for URLs that were served from cache, keyed by URL.
+//
+// Used by smart recrawl: those URLs are skipped this round and their result
+// copied forward, so the reported cache percentage still covers the whole
+// site rather than only the handful of URLs that were re-fetched.
+//
+// Only a HIT-family status counts. A MISS or BYPASS last time is exactly the
+// URL worth checking again, and an absent CF-Cache-Status means the CDN is
+// not answering for it at all.
+func (r *MongoRepository) CachedResultsFromLastCrawl(
+	ctx context.Context,
+	siteID primitive.ObjectID,
+	excludeCrawlingID primitive.ObjectID,
+) (map[string]models.CrawlingResult, error) {
+	var last models.Crawling
+	err := r.crawlings().FindOne(ctx,
+		bson.M{
+			"site_id": siteID,
+			"_id":     bson.M{"$ne": excludeCrawlingID},
+			"status":  models.CrawlStatusCompleted,
+		},
+		options.FindOne().SetSort(bson.D{{Key: "completed_at", Value: -1}}),
+	).Decode(&last)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			// First crawl of this site: nothing to carry forward, crawl it all.
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	cursor, err := r.crawlingResults().Find(ctx, bson.M{
+		"crawling_id": last.ID,
+		"headers.CF-Cache-Status": bson.M{
+			"$in": bson.A{"HIT", "REVALIDATED", "UPDATING"},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	out := make(map[string]models.CrawlingResult)
+	for cursor.Next(ctx) {
+		var res models.CrawlingResult
+		if err := cursor.Decode(&res); err != nil {
+			return nil, err
+		}
+		out[res.URL] = res
+	}
+
+	return out, cursor.Err()
+}
+
+// CarryForwardResults copies previous-round results into the current crawl,
+// marked so a stale row is never mistaken for a freshly fetched one.
+func (r *MongoRepository) CarryForwardResults(
+	ctx context.Context,
+	crawlingID primitive.ObjectID,
+	previous []models.CrawlingResult,
+) error {
+	if len(previous) == 0 {
+		return nil
+	}
+
+	docs := make([]interface{}, 0, len(previous))
+	now := time.Now()
+
+	for _, res := range previous {
+		original := res.CrawledAt
+		if res.OriginalCrawledAt != nil {
+			// Already carried once; keep pointing at the real fetch, not the
+			// round that copied it, or the age would reset every crawl.
+			original = *res.OriginalCrawledAt
+		}
+
+		res.ID = primitive.NilObjectID
+		res.CrawlingID = crawlingID
+		res.CrawledAt = now
+		res.CarriedForward = true
+		res.OriginalCrawledAt = &original
+
+		docs = append(docs, res)
+	}
+
+	_, err := r.crawlingResults().InsertMany(ctx, docs)
+
+	return err
 }
