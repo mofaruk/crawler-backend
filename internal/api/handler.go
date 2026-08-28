@@ -895,18 +895,8 @@ func (h *Handler) GetSiteAnalytics(c *gin.Context) {
 		return
 	}
 
-	// Window: last `days` days (default 7, clamped 1..90).
-	days := 7
-	if raw := c.Query("days"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			days = n
-		}
-	}
-	if days > 90 {
-		days = 90
-	}
-	to := time.Now().UTC()
-	from := to.AddDate(0, 0, -days)
+	// Same window semantics as /issues: rolling days, or an explicit range.
+	from, to, days := resolveWindow(c, 7, 90)
 
 	statusValues, statusTotal, err := h.repo.GetSiteStatusAnalytics(c.Request.Context(), siteID, from, to)
 	if err != nil {
@@ -956,15 +946,9 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 		return
 	}
 
-	days := 30
-	if raw := c.Query("days"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			days = n
-		}
-	}
-	if days > 365 {
-		days = 365
-	}
+	// Window: either a rolling `days` count, or an explicit from/to range.
+	// An explicit range wins — a caller who names dates means them.
+	since, until, days := resolveWindow(c, 30, 365)
 
 	limit := int64(100)
 	if raw := c.Query("limit"); raw != "" {
@@ -973,8 +957,7 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 		}
 	}
 
-	since := time.Now().UTC().AddDate(0, 0, -days)
-	issues, err := h.repo.GetSiteIssues(c.Request.Context(), siteID, since, limit)
+	issues, err := h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, limit)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get site issues")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site issues"})
@@ -989,12 +972,13 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"site_id":  siteID.Hex(),
-		"days":     days,
-		"since":    since,
-		"total":    len(issues),
-		"by_kind":  byKind,
-		"data":     issues,
+		"site_id": siteID.Hex(),
+		"days":    days,
+		"since":   since,
+		"until":   until,
+		"total":   len(issues),
+		"by_kind": byKind,
+		"data":    issues,
 	})
 }
 
@@ -1247,4 +1231,59 @@ func parsePagination(c *gin.Context) (int64, int64) {
 		skip = 0
 	}
 	return skip, limit
+}
+
+
+// resolveWindow reads a time window from the query string.
+//
+// Two forms are accepted, because they answer different questions:
+//   - days=7                     "how have things been lately"
+//   - from=2026-08-01&to=...     "what did it look like on this date"
+//
+// An explicit from/to wins over days: a caller who names dates means them.
+// `to` is inclusive of the whole day, so from=to=today returns today.
+// Returns the resolved bounds plus the equivalent day count for display.
+func resolveWindow(c *gin.Context, defaultDays, maxDays int) (since, until time.Time, days int) {
+	now := time.Now().UTC()
+	until = now
+
+	fromRaw := strings.TrimSpace(c.Query("from"))
+	toRaw := strings.TrimSpace(c.Query("to"))
+
+	if fromRaw != "" {
+		if t, err := parseDay(fromRaw); err == nil {
+			since = t
+			if toRaw != "" {
+				if u, err := parseDay(toRaw); err == nil {
+					// Inclusive end: advance to the start of the next day.
+					until = u.AddDate(0, 0, 1)
+				}
+			}
+			if until.Before(since) {
+				since, until = until, since
+			}
+			return since, until, int(until.Sub(since).Hours()/24) + 1
+		}
+	}
+
+	days = defaultDays
+	if raw := c.Query("days"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > maxDays {
+		days = maxDays
+	}
+
+	return now.AddDate(0, 0, -days), until, days
+}
+
+// parseDay accepts a plain calendar date (2026-08-29) or a full RFC3339
+// timestamp, so the UI can send either.
+func parseDay(raw string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Parse(time.RFC3339, raw)
 }

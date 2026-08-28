@@ -484,10 +484,16 @@ func (r *MongoRepository) GetSiteStatusAnalytics(ctx context.Context, siteID pri
 // Detection is deliberately broad — every signal here is already stored, so
 // reporting it costs one aggregation rather than another crawl.
 func (r *MongoRepository) GetSiteIssues(ctx context.Context, siteID primitive.ObjectID, since time.Time, limit int64) ([]models.SiteIssue, error) {
+	return r.GetSiteIssuesBetween(ctx, siteID, since, time.Now().UTC(), limit)
+}
+
+// GetSiteIssuesBetween is GetSiteIssues over an explicit window, so callers
+// can ask about a specific date or range rather than only "the last N days".
+func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primitive.ObjectID, since, until time.Time, limit int64) ([]models.SiteIssue, error) {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{
 			"site_id":    siteID,
-			"crawled_at": bson.M{"$gte": since},
+			"crawled_at": bson.M{"$gte": since, "$lt": until},
 		}}},
 		// Newest first so $first below picks the current state of each URL.
 		{{Key: "$sort", Value: bson.D{{Key: "crawled_at", Value: -1}}}},
