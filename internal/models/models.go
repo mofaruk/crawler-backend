@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -344,6 +345,28 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 		add("cache_expired", "Cache expired", "Served from origin because the cached copy expired", SeverityInfo)
 	}
 
+	// A cached copy older than the policy allows. This is the failure the
+	// product exists to catch and it hides behind a healthy-looking cache
+	// percentage: the page IS cached, it is just serving content the origin
+	// stopped vouching for.
+	if age, maxAge, ok := cacheFreshness(s.Headers); ok && age > maxAge {
+		over := age - maxAge
+
+		// Warn only past a margin. A copy a few seconds beyond its lifetime is
+		// normal CDN behaviour, not a fault worth reporting on every page.
+		if over > staleGraceSeconds {
+			severity := SeverityWarning
+			if age > maxAge*staleCriticalMultiple {
+				severity = SeverityCritical
+			}
+
+			add("cache_stale", "Serving stale content",
+				fmt.Sprintf("Cached copy is %s old but the policy allows %s",
+					humanDuration(age), humanDuration(maxAge)),
+				severity)
+		}
+	}
+
 	if s.StatusCode == 200 && headerLookup(s.Headers, "Cache-Control") == "" && cacheStatus != "" {
 		add("no_cache_control", "No caching policy",
 			"The origin sends no Cache-Control header, so the CDN must guess", SeverityWarning)
@@ -435,4 +458,90 @@ type TimelinePoint struct {
 	MedianAgeSeconds int64     `json:"median_age_seconds"`
 	AvgResponseMs    int64     `json:"avg_response_ms"`
 	Errors           int       `json:"errors"`
+}
+
+// Stale-cache thresholds.
+const (
+	// A copy slightly past its lifetime is ordinary CDN behaviour — the
+	// refresh has not happened yet. Only a meaningful overrun is a fault.
+	staleGraceSeconds = 60
+
+	// Far past the policy stops being a lag and becomes content the origin
+	// stopped vouching for a long time ago.
+	staleCriticalMultiple = 10
+)
+
+// cacheFreshness reports how old the served copy is and how old the policy
+// permits, in seconds. ok is false when either cannot be determined.
+//
+// s-maxage takes precedence over max-age because it is the directive aimed at
+// shared caches, which is exactly what a CDN is. Comparing Age against max-age
+// alone reports false positives on the common WordPress/Cloudflare setup of a
+// short browser lifetime with a long CDN one — "s-maxage=31557600,
+// max-age=600" is a correctly cached page, not a stale one.
+func cacheFreshness(headers map[string]string) (age, maxAge int, ok bool) {
+	rawAge := strings.TrimSpace(headerLookup(headers, "Age"))
+	if rawAge == "" {
+		return 0, 0, false
+	}
+
+	age, err := strconv.Atoi(rawAge)
+	if err != nil || age < 0 {
+		return 0, 0, false
+	}
+
+	cc := strings.ToLower(headerLookup(headers, "Cache-Control"))
+	if cc == "" {
+		return 0, 0, false
+	}
+
+	// A copy the origin forbids caching cannot be judged against a lifetime;
+	// cache_bypass and friends already cover that case.
+	if strings.Contains(cc, "no-store") || strings.Contains(cc, "no-cache") {
+		return 0, 0, false
+	}
+
+	if v, found := cacheDirectiveSeconds(cc, "s-maxage"); found {
+		return age, v, true
+	}
+	if v, found := cacheDirectiveSeconds(cc, "max-age"); found {
+		return age, v, true
+	}
+
+	return 0, 0, false
+}
+
+// cacheDirectiveSeconds pulls one "name=seconds" directive out of a
+// Cache-Control value.
+func cacheDirectiveSeconds(cacheControl, name string) (int, bool) {
+	for _, part := range strings.Split(cacheControl, ",") {
+		part = strings.TrimSpace(part)
+
+		// Match the whole directive name: "max-age" must not match inside
+		// "s-maxage", which is a different (and higher-priority) directive.
+		rest, found := strings.CutPrefix(part, name+"=")
+		if !found {
+			continue
+		}
+
+		if v, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && v >= 0 {
+			return v, true
+		}
+	}
+
+	return 0, false
+}
+
+// humanDuration renders a second count the way a person would say it.
+func humanDuration(seconds int) string {
+	switch {
+	case seconds < 60:
+		return fmt.Sprintf("%ds", seconds)
+	case seconds < 3600:
+		return fmt.Sprintf("%dm", seconds/60)
+	case seconds < 86400:
+		return fmt.Sprintf("%.1fh", float64(seconds)/3600)
+	default:
+		return fmt.Sprintf("%.1f days", float64(seconds)/86400)
+	}
 }
