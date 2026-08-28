@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"crypto/subtle"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -51,15 +53,67 @@ func Recovery() gin.HandlerFunc {
 	}
 }
 
-// CORS adds CORS headers.
-func CORS() gin.HandlerFunc {
+// CORS restricts cross-origin access to an explicit allowlist.
+//
+// The previous "*" let any web page in a user's browser drive this API. The
+// dashboard talks to it server-to-server from PHP, so the correct default is
+// an empty allowlist — no browser origin at all. Set ALLOWED_ORIGINS only if
+// something genuinely needs browser access.
+func CORS(allowedOrigins []string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		allowed[o] = struct{}{}
+	}
+
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := c.Request.Header.Get("Origin")
+		if origin != "" {
+			if _, ok := allowed[origin]; ok {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Vary", "Origin")
+				c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			}
+		}
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// APIKeyAuth rejects any request without the shared secret.
+//
+// Every route except /health is gated. The key is compared with
+// subtle.ConstantTimeCompare so a timing side-channel cannot reveal it.
+//
+// An empty configured key disables the check entirely: that is a deliberate
+// local-development affordance, and cmd/api logs a startup warning so it
+// cannot be enabled in production by accident.
+func APIKeyAuth(expected string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if expected == "" {
+			c.Next()
+			return
+		}
+
+		provided := c.Request.Header.Get("X-API-Key")
+		if provided == "" {
+			// Also accept "Authorization: Bearer <key>".
+			if h := c.Request.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				provided = strings.TrimPrefix(h, "Bearer ")
+			}
+		}
+
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+			log.Warn().
+				Str("path", c.Request.URL.Path).
+				Str("ip", c.ClientIP()).
+				Msg("rejected request with missing or invalid API key")
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized", "code": "UNAUTHORIZED"})
 			return
 		}
 

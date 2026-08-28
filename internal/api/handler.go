@@ -76,6 +76,19 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		return
 	}
 
+	// Reject infrastructure targets before anything is persisted: both of
+	// these are fetched server-side, so an unvalidated value is an SSRF.
+	if err := source.ValidateTargetURL(req.BaseURL, h.cfg.AllowPrivateTargets); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "base_url rejected: " + err.Error(), Code: "INVALID_TARGET"})
+		return
+	}
+	if strings.TrimSpace(req.URLSource) != "" {
+		if err := source.ValidateTargetURL(req.URLSource, h.cfg.AllowPrivateTargets); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "url_source rejected: " + err.Error(), Code: "INVALID_TARGET"})
+			return
+		}
+	}
+
 	// Parse extract_data from comma-separated string
 	var extractData []string
 	if req.ExtractData != "" {
@@ -169,12 +182,20 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 		update["name"] = *req.Name
 	}
 	if req.BaseURL != nil {
+		if err := source.ValidateTargetURL(*req.BaseURL, h.cfg.AllowPrivateTargets); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "base_url rejected: " + err.Error(), Code: "INVALID_TARGET"})
+			return
+		}
 		update["base_url"] = *req.BaseURL
 	}
 	if req.URLLimit != nil {
 		update["url_limit"] = *req.URLLimit
 	}
 	if req.URLSource != nil {
+		if err := source.ValidateTargetURL(*req.URLSource, h.cfg.AllowPrivateTargets); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "url_source rejected: " + err.Error(), Code: "INVALID_TARGET"})
+			return
+		}
 		update["url_source"] = *req.URLSource
 	}
 	if req.URLSourceType != nil {

@@ -76,10 +76,21 @@ func main() {
 	router := gin.New()
 	router.Use(middleware.Recovery())
 	router.Use(middleware.RequestLogger())
-	router.Use(middleware.CORS())
+	router.Use(middleware.CORS(cfg.AllowedOrigins))
+
+	// Fail loudly rather than silently running an open API in production.
+	if cfg.APIKey == "" {
+		log.Warn().Msg("API_KEY is not set — the API is UNAUTHENTICATED. Set API_KEY before exposing this service.")
+	}
+	if cfg.AllowPrivateTargets {
+		log.Warn().Msg("ALLOW_PRIVATE_TARGETS=true — SSRF protection is DISABLED. Local development only.")
+	}
 
 	// --- Routes ---
 	router.GET("/health", handler.Health)
+
+	// Everything below requires the shared secret.
+	router.Use(middleware.APIKeyAuth(cfg.APIKey))
 
 	// Sites
 	router.POST("/sites", handler.CreateSite)

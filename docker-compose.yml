@@ -16,6 +16,10 @@ services:
       - MONGO_DB=crawler
       - REDIS_ADDR=crawler_redis:6379
       - LOG_LEVEL=info
+      - API_KEY=${CRAWLER_API_KEY:-}
+      # Local development only: sources live on host.docker.internal, which
+      # resolves to a private address the SSRF guard would otherwise reject.
+      - ALLOW_PRIVATE_TARGETS=${CRAWLER_ALLOW_PRIVATE_TARGETS:-true}
       - CRAWLER_MAX_RETRIES=3
       - DEFAULT_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
     depends_on:

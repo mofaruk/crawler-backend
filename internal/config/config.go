@@ -45,6 +45,19 @@ type Config struct {
 	WebhookTimeout   time.Duration
 	WebhookMaxRetries int
 
+	// Security
+	//
+	// APIKey gates every route except /health. Empty disables the check —
+	// intended only for local development; the service logs a loud warning
+	// at startup when it is unset.
+	APIKey string
+	// AllowedOrigins is a comma-separated CORS allowlist. Empty means no
+	// cross-origin browser access, which is correct for a server-to-server
+	// API; the dashboard calls it from PHP, not from the browser.
+	AllowedOrigins []string
+	// AllowPrivateTargets disables the SSRF guard. Local development only.
+	AllowPrivateTargets bool
+
 	// Logging
 	LogLevel string
 }
@@ -85,6 +98,10 @@ func Load() *Config {
 		WebhookTimeout:    envDuration("WEBHOOK_TIMEOUT", 10*time.Second),
 		WebhookMaxRetries: envInt("WEBHOOK_MAX_RETRIES", 3),
 
+		APIKey:              envStr("API_KEY", ""),
+		AllowedOrigins:      splitAndTrim(envStr("ALLOWED_ORIGINS", "")),
+		AllowPrivateTargets: envStr("ALLOW_PRIVATE_TARGETS", "") == "true",
+
 		LogLevel: strings.ToLower(envStr("LOG_LEVEL", "info")),
 	}
 }
@@ -112,4 +129,19 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// splitAndTrim parses a comma-separated env var into a slice, dropping blanks.
+func splitAndTrim(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
