@@ -230,6 +230,34 @@ func (r *MongoRepository) CreateCrawling(ctx context.Context, crawling *models.C
 	return nil
 }
 
+// ActiveCrawlingForSite returns the site's in-flight crawl, or nil.
+//
+// A second concurrent crawl doubles the request rate against the customer's
+// server — two rounds at 14,400/hr is 28,800/hr arriving at an origin that
+// was sized for one. Callers use this to refuse the second start.
+func (r *MongoRepository) ActiveCrawlingForSite(ctx context.Context, siteID primitive.ObjectID) (*models.Crawling, error) {
+	var crawling models.Crawling
+
+	err := r.crawlings().FindOne(ctx, bson.M{
+		"site_id": siteID,
+		"status": bson.M{"$in": bson.A{
+			models.CrawlStatusPending,
+			models.CrawlStatusDiscovering,
+			models.CrawlStatusRunning,
+			models.CrawlStatusPaused,
+		}},
+	}).Decode(&crawling)
+
+	if err == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &crawling, nil
+}
+
 func (r *MongoRepository) GetCrawling(ctx context.Context, id primitive.ObjectID) (*models.Crawling, error) {
 	var crawling models.Crawling
 	err := r.crawlings().FindOne(ctx, bson.M{"_id": id}).Decode(&crawling)

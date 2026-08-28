@@ -280,6 +280,25 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 		return
 	}
 
+	// Refuse a second concurrent crawl of the same site.
+	//
+	// Two rounds running together double the request rate against the
+	// customer's origin, which can take their site down. Enforced here rather
+	// than only in the dashboard so any caller is covered, and returns the
+	// existing crawl so the UI can link to it instead of just refusing.
+	if active, err := h.repo.ActiveCrawlingForSite(c.Request.Context(), siteID); err != nil {
+		log.Error().Err(err).Msg("failed to check for an active crawling")
+	} else if active != nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":      "this site is already being crawled",
+			"code":       "ALREADY_RUNNING",
+			"crawling_id": active.ID.Hex(),
+			"status":     active.Status,
+			"started_at": active.StartedAt,
+		})
+		return
+	}
+
 	// Apply speed defaults and limits
 	speed := req.Speed
 	if speed <= 0 {

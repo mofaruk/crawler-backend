@@ -426,6 +426,55 @@ func (p *URLParser) parseSitemap(ctx context.Context, target, userAgent string, 
 	return urls, nil
 }
 
+// parseSitemapReader parses one already-fetched sitemap document without
+// following child sitemaps. Used by sitemap discovery, which needs to know a
+// document is real and has entries — not to walk the whole tree.
+func (p *URLParser) parseSitemapReader(r io.Reader, limit int, stats *ParseStats) ([]string, error) {
+	var urls []string
+	docFormat := ""
+
+	decoder := xml.NewDecoder(bufio.NewReaderSize(r, 64*1024))
+	decoder.CharsetReader = charset.NewReaderLabel
+
+	for {
+		if limit > 0 && len(urls) >= limit {
+			break
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		se, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch se.Name.Local {
+		case "urlset":
+			if docFormat == "" {
+				docFormat = "urlset"
+			}
+		case "sitemapindex":
+			if docFormat == "" {
+				docFormat = "sitemapindex"
+			}
+		case "url":
+			var u sitemapLoc
+			if decoder.DecodeElement(&u, &se) == nil && isValidURL(strings.TrimSpace(u.Loc)) {
+				urls = append(urls, strings.TrimSpace(u.Loc))
+			}
+		case "sitemap":
+			stats.XMLChildSitemaps++
+			var sm sitemapLoc
+			if decoder.DecodeElement(&sm, &se) == nil && isValidURL(strings.TrimSpace(sm.Loc)) {
+				urls = append(urls, strings.TrimSpace(sm.Loc))
+			}
+		}
+	}
+
+	stats.XMLFormat = docFormat
+	return urls, nil
+}
+
 func isValidURL(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
