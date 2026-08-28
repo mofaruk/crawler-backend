@@ -939,6 +939,65 @@ func (h *Handler) GetSiteAnalytics(c *gin.Context) {
 	})
 }
 
+// GET /sites/:id/issues?days=30&limit=100 — URLs currently failing for a site.
+//
+// This is the "site health" view: broken links, gone pages and server errors,
+// aggregated across every crawl in the window rather than a single round, so a
+// customer sees what is wrong with their site rather than what one crawl saw.
+func (h *Handler) GetSiteIssues(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	if _, err := h.repo.GetSite(c.Request.Context(), siteID); err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	days := 30
+	if raw := c.Query("days"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > 365 {
+		days = 365
+	}
+
+	limit := int64(100)
+	if raw := c.Query("limit"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+
+	since := time.Now().UTC().AddDate(0, 0, -days)
+	issues, err := h.repo.GetSiteIssues(c.Request.Context(), siteID, since, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get site issues")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site issues"})
+		return
+	}
+
+	// Counts by kind, so the UI can headline "3 broken links" without
+	// re-deriving it from the list.
+	byKind := map[string]int{}
+	for _, i := range issues {
+		byKind[i.Kind]++
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"site_id":  siteID.Hex(),
+		"days":     days,
+		"since":    since,
+		"total":    len(issues),
+		"by_kind":  byKind,
+		"data":     issues,
+	})
+}
+
 // GET /crawlings/:id/results?header=cf-cache-status&value=MISS&skip=0&limit=20
 func (h *Handler) GetCrawlingResults(c *gin.Context) {
 	oid, err := primitive.ObjectIDFromHex(c.Param("id"))

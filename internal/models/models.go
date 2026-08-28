@@ -196,3 +196,39 @@ type HeaderValueCount struct {
 	Value string `json:"value"`
 	Count int64  `json:"count"`
 }
+
+// --- Site Issues (error detection) ---
+
+// SiteIssue is one URL that is currently failing for a site, together with
+// how long it has been failing.
+//
+// This is derived from crawl results rather than stored separately: the most
+// recent result per URL is the current state, and first_seen comes from the
+// oldest result carrying the same failing status.
+type SiteIssue struct {
+	URL         string    `bson:"url" json:"url"`
+	StatusCode  int       `bson:"status_code" json:"status_code"`
+	Kind        string    `json:"kind"` // "broken" | "gone" | "server_error" | "unreachable"
+	ContentType string    `bson:"content_type" json:"content_type,omitempty"`
+	FirstSeen   time.Time `bson:"first_seen" json:"first_seen"`
+	LastSeen    time.Time `bson:"last_seen" json:"last_seen"`
+	Occurrences int       `bson:"occurrences" json:"occurrences"`
+}
+
+// IssueKindFor maps an HTTP status to the category shown to users. The
+// wording is deliberately non-technical: customers reading this report are
+// site owners, not engineers.
+func IssueKindFor(status int) string {
+	switch {
+	case status == 410:
+		return "gone"
+	case status >= 500:
+		return "server_error"
+	case status >= 400:
+		return "broken"
+	case status == 0:
+		return "unreachable"
+	default:
+		return ""
+	}
+}

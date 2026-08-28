@@ -473,6 +473,67 @@ func (r *MongoRepository) GetSiteStatusAnalytics(ctx context.Context, siteID pri
 	}, "status_code")
 }
 
+// GetSiteIssues returns the URLs currently failing for a site.
+//
+// "Currently" means the most recent result for each URL: a URL that returned
+// 404 last week but 200 today is fixed and must not be reported. The pipeline
+// groups by URL, keeps the newest result per URL, then filters to failures —
+// doing it in that order is what makes the result current rather than
+// historical.
+//
+// first_seen/occurrences describe how persistent the problem is, so the UI can
+// distinguish a transient blip from something broken for a fortnight.
+func (r *MongoRepository) GetSiteIssues(ctx context.Context, siteID primitive.ObjectID, since time.Time, limit int64) ([]models.SiteIssue, error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"site_id":    siteID,
+			"crawled_at": bson.M{"$gte": since},
+		}}},
+		// Newest first so $first below picks the current state.
+		{{Key: "$sort", Value: bson.D{{Key: "crawled_at", Value: -1}}}},
+		{{Key: "$group", Value: bson.M{
+			"_id":          "$url",
+			"status_code":  bson.M{"$first": "$status_code"},
+			"content_type": bson.M{"$first": "$content_type"},
+			"last_seen":    bson.M{"$first": "$crawled_at"},
+			"first_seen":   bson.M{"$last": "$crawled_at"},
+			"occurrences":  bson.M{"$sum": 1},
+		}}},
+		// Filter AFTER grouping: a URL only counts as an issue if its latest
+		// result is a failure.
+		{{Key: "$match", Value: bson.M{"status_code": bson.M{"$gte": 400}}}},
+		{{Key: "$sort", Value: bson.D{
+			{Key: "status_code", Value: -1}, // 5xx before 4xx
+			{Key: "occurrences", Value: -1},
+		}}},
+		{{Key: "$limit", Value: limit}},
+		{{Key: "$project", Value: bson.M{
+			"_id":          0,
+			"url":          "$_id",
+			"status_code":  1,
+			"content_type": 1,
+			"first_seen":   1,
+			"last_seen":    1,
+			"occurrences":  1,
+		}}},
+	}
+
+	cursor, err := r.crawlingResults().Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var issues []models.SiteIssue
+	if err := cursor.All(ctx, &issues); err != nil {
+		return nil, err
+	}
+	for i := range issues {
+		issues[i].Kind = models.IssueKindFor(issues[i].StatusCode)
+	}
+	return issues, nil
+}
+
 func (r *MongoRepository) GetCrawlingResults(ctx context.Context, crawlingID primitive.ObjectID, filter bson.M, skip, limit int64) ([]models.CrawlingResult, int64, error) {
 	filter["crawling_id"] = crawlingID
 
