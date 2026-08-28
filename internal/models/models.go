@@ -409,3 +409,15 @@ func headerLookup(headers map[string]string, name string) string {
 	}
 	return ""
 }
+
+// TimelinePoint is one crawl of a site, reduced to the handful of numbers
+// worth plotting against time.
+type TimelinePoint struct {
+	CrawlingID       string    `json:"crawling_id"`
+	CrawledAt        time.Time `json:"crawled_at"`
+	URLs             int       `json:"urls"`
+	CachePercent     float64   `json:"cache_percent"`
+	MedianAgeSeconds int64     `json:"median_age_seconds"`
+	AvgResponseMs    int64     `json:"avg_response_ms"`
+	Errors           int       `json:"errors"`
+}

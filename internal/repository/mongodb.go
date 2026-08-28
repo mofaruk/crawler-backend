@@ -474,6 +474,110 @@ func (r *MongoRepository) GetSiteStatusAnalytics(ctx context.Context, siteID pri
 	}, "status_code")
 }
 
+// GetSiteTimeline returns one datapoint per completed crawl of a site, so the
+// UI can plot how a site changed over time rather than only its current state.
+//
+// Everything here comes from stored results — no extra crawling — and each
+// series answers a different question:
+//   · cache coverage      is the CDN doing its job
+//   · median age          how stale is what visitors receive
+//   · response time       is the origin (or edge) getting slower
+//   · errors              is the site breaking
+//
+// Plotted together they separate causes that a single number conflates: cache
+// falling while response time rises is a CDN problem; both steady while errors
+// climb is an origin problem.
+func (r *MongoRepository) GetSiteTimeline(ctx context.Context, siteID primitive.ObjectID, since time.Time, limit int64) ([]models.TimelinePoint, error) {
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{
+			"site_id":    siteID,
+			"crawled_at": bson.M{"$gte": since},
+		}}},
+		{{Key: "$group", Value: bson.M{
+			"_id":        "$crawling_id",
+			"crawled_at": bson.M{"$min": "$crawled_at"},
+			"total":      bson.M{"$sum": 1},
+			"errors": bson.M{"$sum": bson.M{
+				"$cond": bson.A{bson.M{"$gte": bson.A{"$status_code", 400}}, 1, 0},
+			}},
+			"avg_response": bson.M{"$avg": "$response_time_ms"},
+			// Ages arrive as header strings; convert what parses and ignore
+			// the rest rather than dropping the whole datapoint.
+			"ages": bson.M{"$push": bson.M{
+				"$convert": bson.M{
+					"input":   "$headers.Age",
+					"to":      "double",
+					"onError": nil,
+					"onNull":  nil,
+				},
+			}},
+			"cached": bson.M{"$sum": bson.M{
+				"$cond": bson.A{
+					bson.M{"$in": bson.A{"$headers.CF-Cache-Status", bson.A{"HIT", "REVALIDATED", "UPDATING"}}},
+					1, 0,
+				},
+			}},
+			"cache_known": bson.M{"$sum": bson.M{
+				"$cond": bson.A{bson.M{"$ifNull": bson.A{"$headers.CF-Cache-Status", false}}, 1, 0},
+			}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "crawled_at", Value: 1}}}},
+		{{Key: "$limit", Value: limit}},
+	}
+
+	cursor, err := r.crawlingResults().Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var raw []struct {
+		CrawlingID  primitive.ObjectID `bson:"_id"`
+		CrawledAt   time.Time          `bson:"crawled_at"`
+		Total       int                `bson:"total"`
+		Errors      int                `bson:"errors"`
+		AvgResponse float64            `bson:"avg_response"`
+		Ages        []*float64         `bson:"ages"`
+		Cached      int                `bson:"cached"`
+		CacheKnown  int                `bson:"cache_known"`
+	}
+	if err := cursor.All(ctx, &raw); err != nil {
+		return nil, err
+	}
+
+	points := make([]models.TimelinePoint, 0, len(raw))
+	for _, p := range raw {
+		point := models.TimelinePoint{
+			CrawlingID:   p.CrawlingID.Hex(),
+			CrawledAt:    p.CrawledAt,
+			URLs:         p.Total,
+			Errors:       p.Errors,
+			AvgResponseMs: int64(p.AvgResponse),
+		}
+
+		if p.CacheKnown > 0 {
+			point.CachePercent = float64(int(float64(p.Cached)/float64(p.CacheKnown)*1000)) / 10
+		}
+
+		// Median rather than mean: one page cached for a year would drag an
+		// average far away from what a typical visitor receives.
+		var ages []float64
+		for _, a := range p.Ages {
+			if a != nil {
+				ages = append(ages, *a)
+			}
+		}
+		if len(ages) > 0 {
+			sort.Float64s(ages)
+			point.MedianAgeSeconds = int64(ages[len(ages)/2])
+		}
+
+		points = append(points, point)
+	}
+
+	return points, nil
+}
+
 // GetSiteIssues returns everything currently wrong with a site.
 //
 // "Currently" is the important part: the pipeline keeps only the newest result

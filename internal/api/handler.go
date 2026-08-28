@@ -982,6 +982,48 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 	})
 }
 
+// GET /sites/:id/timeline?days=30&limit=100 — how a site changed over time.
+//
+// One point per crawl, several measures each, so the caller can plot them
+// together: coverage, staleness, speed and errors move independently, and
+// seeing them on one axis is what separates a CDN problem from an origin one.
+func (h *Handler) GetSiteTimeline(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	if _, err := h.repo.GetSite(c.Request.Context(), siteID); err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	since, _, days := resolveWindow(c, 30, 365)
+
+	limit := int64(100)
+	if raw := c.Query("limit"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	points, err := h.repo.GetSiteTimeline(c.Request.Context(), siteID, since, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to build site timeline")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to build site timeline"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"site_id": siteID.Hex(),
+		"days":    days,
+		"since":   since,
+		"total":   len(points),
+		"data":    points,
+	})
+}
+
 // GET /crawlings/:id/results?header=cf-cache-status&value=MISS&skip=0&limit=20
 func (h *Handler) GetCrawlingResults(c *gin.Context) {
 	oid, err := primitive.ObjectIDFromHex(c.Param("id"))

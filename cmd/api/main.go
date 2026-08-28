@@ -98,6 +98,7 @@ func main() {
 	router.GET("/sites/:id", handler.GetSite)
 	router.GET("/sites/:id/analytics", handler.GetSiteAnalytics)
 	router.GET("/sites/:id/issues", handler.GetSiteIssues)
+	router.GET("/sites/:id/timeline", handler.GetSiteTimeline)
 	router.PUT("/sites/:id", handler.UpdateSite)
 	router.DELETE("/sites/:id", handler.DeleteSite)
 
