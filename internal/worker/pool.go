@@ -317,6 +317,23 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 		ContentType:  result.ContentType,
 		ResponseTime: result.ResponseTime.Milliseconds(),
 		CrawledAt:    time.Now(),
+		RedirectedTo: result.RedirectedTo,
+	}
+
+	if result.Signals != nil {
+		crawlingResult.Page = &models.PageSignals{
+			Title:            result.Signals.Title,
+			TitleLength:      result.Signals.TitleLength,
+			MetaDescription:  result.Signals.MetaDescription,
+			MetaDescLength:   result.Signals.MetaDescLength,
+			Canonical:        result.Signals.Canonical,
+			NoIndex:          result.Signals.NoIndex,
+			H1Count:          result.Signals.H1Count,
+			WordCount:        result.Signals.WordCount,
+			ImagesMissingAlt: result.Signals.ImagesMissingAlt,
+			InsecureRefs:     result.Signals.InsecureRefs,
+			SoftNotFound:     result.Signals.SoftNotFound,
+		}
 	}
 
 	if err := p.repo.InsertCrawlingResult(ctx, &crawlingResult); err != nil {

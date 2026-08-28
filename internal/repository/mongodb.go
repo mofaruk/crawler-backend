@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -473,48 +474,48 @@ func (r *MongoRepository) GetSiteStatusAnalytics(ctx context.Context, siteID pri
 	}, "status_code")
 }
 
-// GetSiteIssues returns the URLs currently failing for a site.
+// GetSiteIssues returns everything currently wrong with a site.
 //
-// "Currently" means the most recent result for each URL: a URL that returned
-// 404 last week but 200 today is fixed and must not be reported. The pipeline
-// groups by URL, keeps the newest result per URL, then filters to failures —
-// doing it in that order is what makes the result current rather than
-// historical.
+// "Currently" is the important part: the pipeline keeps only the newest result
+// per URL *before* classifying, so a URL that 404'd last week but returns 200
+// today is not reported. first_seen and occurrences come along so the caller
+// can tell a transient blip from something broken for a fortnight.
 //
-// first_seen/occurrences describe how persistent the problem is, so the UI can
-// distinguish a transient blip from something broken for a fortnight.
+// Detection is deliberately broad — every signal here is already stored, so
+// reporting it costs one aggregation rather than another crawl.
 func (r *MongoRepository) GetSiteIssues(ctx context.Context, siteID primitive.ObjectID, since time.Time, limit int64) ([]models.SiteIssue, error) {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{
 			"site_id":    siteID,
 			"crawled_at": bson.M{"$gte": since},
 		}}},
-		// Newest first so $first below picks the current state.
+		// Newest first so $first below picks the current state of each URL.
 		{{Key: "$sort", Value: bson.D{{Key: "crawled_at", Value: -1}}}},
 		{{Key: "$group", Value: bson.M{
-			"_id":          "$url",
-			"status_code":  bson.M{"$first": "$status_code"},
-			"content_type": bson.M{"$first": "$content_type"},
-			"last_seen":    bson.M{"$first": "$crawled_at"},
-			"first_seen":   bson.M{"$last": "$crawled_at"},
-			"occurrences":  bson.M{"$sum": 1},
+			"_id":           "$url",
+			"status_code":   bson.M{"$first": "$status_code"},
+			"content_type":  bson.M{"$first": "$content_type"},
+			"response_time": bson.M{"$first": "$response_time_ms"},
+			"redirected_to": bson.M{"$first": "$redirected_to"},
+			"headers":       bson.M{"$first": "$headers"},
+			"page":          bson.M{"$first": "$page"},
+			"last_seen":     bson.M{"$first": "$crawled_at"},
+			"first_seen":    bson.M{"$last": "$crawled_at"},
+			"occurrences":   bson.M{"$sum": 1},
 		}}},
-		// Filter AFTER grouping: a URL only counts as an issue if its latest
-		// result is a failure.
-		{{Key: "$match", Value: bson.M{"status_code": bson.M{"$gte": 400}}}},
-		{{Key: "$sort", Value: bson.D{
-			{Key: "status_code", Value: -1}, // 5xx before 4xx
-			{Key: "occurrences", Value: -1},
-		}}},
-		{{Key: "$limit", Value: limit}},
+		{{Key: "$sort", Value: bson.D{{Key: "status_code", Value: -1}}}},
 		{{Key: "$project", Value: bson.M{
-			"_id":          0,
-			"url":          "$_id",
-			"status_code":  1,
-			"content_type": 1,
-			"first_seen":   1,
-			"last_seen":    1,
-			"occurrences":  1,
+			"_id":           0,
+			"url":           "$_id",
+			"status_code":   1,
+			"content_type":  1,
+			"response_time": 1,
+			"redirected_to": 1,
+			"headers":       1,
+			"page":          1,
+			"first_seen":    1,
+			"last_seen":     1,
+			"occurrences":   1,
 		}}},
 	}
 
@@ -524,12 +525,35 @@ func (r *MongoRepository) GetSiteIssues(ctx context.Context, siteID primitive.Ob
 	}
 	defer cursor.Close(ctx)
 
-	var issues []models.SiteIssue
-	if err := cursor.All(ctx, &issues); err != nil {
+	var rows []models.URLState
+	if err := cursor.All(ctx, &rows); err != nil {
 		return nil, err
 	}
-	for i := range issues {
-		issues[i].Kind = models.IssueKindFor(issues[i].StatusCode)
+
+	// Duplicate titles can only be found across the whole set, so count them
+	// before classifying any single URL.
+	titleCounts := map[string]int{}
+	for _, row := range rows {
+		if row.Page != nil && row.Page.Title != "" {
+			titleCounts[strings.ToLower(row.Page.Title)]++
+		}
+	}
+
+	issues := make([]models.SiteIssue, 0, len(rows))
+	for _, row := range rows {
+		issues = append(issues, models.ClassifyURL(row, titleCounts)...)
+	}
+
+	// Most severe first, then most persistent.
+	sort.SliceStable(issues, func(i, j int) bool {
+		if issues[i].Severity != issues[j].Severity {
+			return issues[i].Severity > issues[j].Severity
+		}
+		return issues[i].Occurrences > issues[j].Occurrences
+	})
+
+	if int64(len(issues)) > limit {
+		issues = issues[:limit]
 	}
 	return issues, nil
 }

@@ -1,6 +1,8 @@
 package models
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -109,6 +111,26 @@ type CrawlingResult struct {
 	ContentType  string                 `bson:"content_type" json:"content_type"`
 	ResponseTime int64                  `bson:"response_time_ms" json:"response_time_ms"`
 	CrawledAt    time.Time              `bson:"crawled_at" json:"crawled_at"`
+	// RedirectedTo is the final URL when the request was redirected.
+	RedirectedTo string `bson:"redirected_to,omitempty" json:"redirected_to,omitempty"`
+	// Page holds on-page signals parsed from an HTML body; nil for assets.
+	Page *PageSignals `bson:"page,omitempty" json:"page,omitempty"`
+}
+
+// PageSignals mirrors crawler.PageSignals for storage. Duplicated rather than
+// imported so the models package stays dependency-free.
+type PageSignals struct {
+	Title            string `bson:"title,omitempty" json:"title,omitempty"`
+	TitleLength      int    `bson:"title_length,omitempty" json:"title_length,omitempty"`
+	MetaDescription  string `bson:"meta_description,omitempty" json:"meta_description,omitempty"`
+	MetaDescLength   int    `bson:"meta_desc_length,omitempty" json:"meta_desc_length,omitempty"`
+	Canonical        string `bson:"canonical,omitempty" json:"canonical,omitempty"`
+	NoIndex          bool   `bson:"noindex,omitempty" json:"noindex,omitempty"`
+	H1Count          int    `bson:"h1_count,omitempty" json:"h1_count,omitempty"`
+	WordCount        int    `bson:"word_count,omitempty" json:"word_count,omitempty"`
+	ImagesMissingAlt int    `bson:"images_missing_alt,omitempty" json:"images_missing_alt,omitempty"`
+	InsecureRefs     int    `bson:"insecure_refs,omitempty" json:"insecure_refs,omitempty"`
+	SoftNotFound     bool   `bson:"soft_not_found,omitempty" json:"soft_not_found,omitempty"`
 }
 
 // --- Crawl Failure ---
@@ -199,36 +221,191 @@ type HeaderValueCount struct {
 
 // --- Site Issues (error detection) ---
 
-// SiteIssue is one URL that is currently failing for a site, together with
-// how long it has been failing.
-//
-// This is derived from crawl results rather than stored separately: the most
-// recent result per URL is the current state, and first_seen comes from the
-// oldest result carrying the same failing status.
-type SiteIssue struct {
-	URL         string    `bson:"url" json:"url"`
-	StatusCode  int       `bson:"status_code" json:"status_code"`
-	Kind        string    `json:"kind"` // "broken" | "gone" | "server_error" | "unreachable"
-	ContentType string    `bson:"content_type" json:"content_type,omitempty"`
-	FirstSeen   time.Time `bson:"first_seen" json:"first_seen"`
-	LastSeen    time.Time `bson:"last_seen" json:"last_seen"`
-	Occurrences int       `bson:"occurrences" json:"occurrences"`
+// URLState is the current state of one URL, assembled from its most recent
+// crawl result. It is the input to classification.
+type URLState struct {
+	URL          string            `bson:"url"`
+	StatusCode   int               `bson:"status_code"`
+	ContentType  string            `bson:"content_type"`
+	ResponseTime int64             `bson:"response_time"`
+	RedirectedTo string            `bson:"redirected_to"`
+	Headers      map[string]string `bson:"headers"`
+	Page         *PageSignals      `bson:"page"`
+	FirstSeen    time.Time         `bson:"first_seen"`
+	LastSeen     time.Time         `bson:"last_seen"`
+	Occurrences  int               `bson:"occurrences"`
 }
 
-// IssueKindFor maps an HTTP status to the category shown to users. The
-// wording is deliberately non-technical: customers reading this report are
-// site owners, not engineers.
-func IssueKindFor(status int) string {
+// Severity orders issues for display. Higher is worse.
+const (
+	SeverityInfo     = 1 // worth knowing, not broken
+	SeverityWarning  = 2 // degrades quality or performance
+	SeverityCritical = 3 // visitors or search engines see something broken
+)
+
+// SiteIssue is one problem found at one URL. A single URL can produce several
+// (a slow page that is also uncached and missing a title), so issues are
+// reported per finding rather than per URL.
+type SiteIssue struct {
+	URL         string    `json:"url"`
+	Kind        string    `json:"kind"`
+	Title       string    `json:"title"`             // human-readable summary
+	Detail      string    `json:"detail,omitempty"`  // the specific value found
+	Severity    int       `json:"severity"`
+	StatusCode  int       `json:"status_code,omitempty"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	Occurrences int       `json:"occurrences"`
+}
+
+// Thresholds for the quality checks. Chosen to flag real problems rather than
+// stylistic preferences: a 4-second page is slow by any standard, whereas a
+// 55-character title is fine even though SEO tools like 50-60.
+const (
+	slowPageMs      = 2000
+	verySlowPageMs  = 5000
+	shortTitleChars = 10
+	longTitleChars  = 70
+	thinContentWords = 100
+)
+
+// ClassifyURL turns one URL's current state into zero or more issues.
+//
+// Every check here runs on data the crawler already stored, so breadth costs
+// an aggregation rather than another crawl.
+func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
+	var out []SiteIssue
+
+	add := func(kind, title, detail string, severity int) {
+		out = append(out, SiteIssue{
+			URL: s.URL, Kind: kind, Title: title, Detail: detail,
+			Severity: severity, StatusCode: s.StatusCode,
+			FirstSeen: s.FirstSeen, LastSeen: s.LastSeen, Occurrences: s.Occurrences,
+		})
+	}
+
+	// --- Availability ---
 	switch {
-	case status == 410:
-		return "gone"
-	case status >= 500:
-		return "server_error"
-	case status >= 400:
-		return "broken"
-	case status == 0:
-		return "unreachable"
-	default:
+	case s.StatusCode >= 500:
+		add("server_error", "Server error", fmt.Sprintf("Returns HTTP %d", s.StatusCode), SeverityCritical)
+	case s.StatusCode == 410:
+		add("gone", "Page permanently gone", "Returns HTTP 410", SeverityWarning)
+	case s.StatusCode >= 400:
+		add("broken", "Broken page", fmt.Sprintf("Returns HTTP %d", s.StatusCode), SeverityCritical)
+	case s.StatusCode == 0:
+		add("unreachable", "Could not be reached", "No response from the server", SeverityCritical)
+	}
+
+	// A 200 that reads as an error page is worse than a real 404: search
+	// engines index it and visitors get no signal the link is dead.
+	if s.Page != nil && s.Page.SoftNotFound && s.StatusCode == 200 {
+		add("soft_404", "Looks like an error page but returns OK",
+			"Title: "+s.Page.Title, SeverityCritical)
+	}
+
+	// --- Redirects ---
+	if s.RedirectedTo != "" {
+		add("redirect", "Redirects elsewhere", "Now serves "+s.RedirectedTo, SeverityInfo)
+	}
+
+	// --- Performance ---
+	switch {
+	case s.ResponseTime >= verySlowPageMs:
+		add("very_slow", "Very slow to load",
+			fmt.Sprintf("Took %.1fs", float64(s.ResponseTime)/1000), SeverityCritical)
+	case s.ResponseTime >= slowPageMs:
+		add("slow", "Slow to load",
+			fmt.Sprintf("Took %.1fs", float64(s.ResponseTime)/1000), SeverityWarning)
+	}
+
+	// --- Caching (the product's core subject) ---
+	cacheStatus := headerLookup(s.Headers, "CF-Cache-Status")
+	switch strings.ToUpper(cacheStatus) {
+	case "BYPASS":
+		add("cache_bypass", "Never cached", "CDN is bypassing the cache for this URL", SeverityWarning)
+	case "DYNAMIC":
+		add("cache_dynamic", "Not cacheable", "CDN treats this URL as dynamic", SeverityWarning)
+	case "EXPIRED":
+		add("cache_expired", "Cache expired", "Served from origin because the cached copy expired", SeverityInfo)
+	}
+
+	if s.StatusCode == 200 && headerLookup(s.Headers, "Cache-Control") == "" && cacheStatus != "" {
+		add("no_cache_control", "No caching policy",
+			"The origin sends no Cache-Control header, so the CDN must guess", SeverityWarning)
+	}
+
+	// --- Page quality (HTML only) ---
+	if p := s.Page; p != nil && s.StatusCode == 200 {
+		switch {
+		case p.Title == "":
+			add("missing_title", "No page title", "Search results will show a URL instead of a name", SeverityWarning)
+		case p.TitleLength < shortTitleChars:
+			add("short_title", "Very short page title", "Title: "+p.Title, SeverityInfo)
+		case p.TitleLength > longTitleChars:
+			add("long_title", "Page title will be truncated",
+				fmt.Sprintf("%d characters; search results show about %d", p.TitleLength, longTitleChars), SeverityInfo)
+		}
+
+		if p.Title != "" && titleCounts[strings.ToLower(p.Title)] > 1 {
+			add("duplicate_title", "Duplicate page title",
+				fmt.Sprintf("%d pages share the title %q", titleCounts[strings.ToLower(p.Title)], p.Title), SeverityWarning)
+		}
+
+		if p.MetaDescription == "" {
+			add("missing_meta_description", "No meta description",
+				"Search engines will invent a snippet for this page", SeverityInfo)
+		}
+
+		if p.NoIndex {
+			add("noindex", "Hidden from search engines",
+				"This page carries a noindex tag", SeverityCritical)
+		}
+
+		if p.Canonical == "" {
+			add("missing_canonical", "No canonical URL",
+				"Duplicate versions of this page may compete with each other", SeverityInfo)
+		}
+
+		switch {
+		case p.H1Count == 0:
+			add("missing_h1", "No main heading", "The page has no <h1>", SeverityInfo)
+		case p.H1Count > 1:
+			add("multiple_h1", "Several main headings",
+				fmt.Sprintf("%d <h1> elements", p.H1Count), SeverityInfo)
+		}
+
+		if p.WordCount > 0 && p.WordCount < thinContentWords {
+			add("thin_content", "Very little content",
+				fmt.Sprintf("About %d words", p.WordCount), SeverityInfo)
+		}
+
+		if p.InsecureRefs > 0 {
+			add("mixed_content", "Loads insecure resources",
+				fmt.Sprintf("%d http:// resources on an https page; browsers block these", p.InsecureRefs), SeverityCritical)
+		}
+
+		if p.ImagesMissingAlt > 0 {
+			add("images_missing_alt", "Images without alt text",
+				fmt.Sprintf("%d images", p.ImagesMissingAlt), SeverityInfo)
+		}
+	}
+
+	return out
+}
+
+// headerLookup finds a header case-insensitively — servers vary in casing and
+// Mongo field paths are exact.
+func headerLookup(headers map[string]string, name string) string {
+	if headers == nil {
 		return ""
 	}
+	if v, ok := headers[name]; ok {
+		return v
+	}
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }

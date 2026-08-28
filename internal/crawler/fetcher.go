@@ -65,6 +65,11 @@ type FetchResult struct {
 	ContentType  string
 	ResponseTime time.Duration
 	Error        error
+	// RedirectedTo is set when the response came from a different URL than
+	// requested, so redirect chains can be reported.
+	RedirectedTo string
+	// Signals are on-page facts parsed from an HTML body. Nil for non-HTML.
+	Signals *PageSignals
 }
 
 // Fetch crawls a single URL and extracts the requested headers.
@@ -100,11 +105,29 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, task *models.CrawlTask) *FetchR
 	}
 	defer resp.Body.Close()
 
-	// Drain body to allow connection reuse (but limit read)
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)) // 1MB max
-
 	result.StatusCode = resp.StatusCode
 	result.ContentType = resp.Header.Get("Content-Type")
+
+	// The final URL after redirects. Comparing it with the requested URL is
+	// how a redirect is detected: the client follows them transparently, so
+	// the status code alone would always read 200.
+	if resp.Request != nil && resp.Request.URL != nil {
+		if final := resp.Request.URL.String(); final != task.URL {
+			result.RedirectedTo = final
+		}
+	}
+
+	// The body has to be read anyway to free the connection for reuse, so
+	// parse it on the way past when it is HTML — that yields page-quality
+	// signals for no extra request and no extra download.
+	limited := io.LimitReader(resp.Body, 1<<20) // 1MB cap
+	if isHTML(result.ContentType) {
+		signals := ExtractPageSignals(limited, strings.HasPrefix(strings.ToLower(task.URL), "https://"))
+		result.Signals = &signals
+	}
+	// Drain whatever the parser did not consume.
+	io.Copy(io.Discard, limited)
+
 	result.ResponseTime = time.Since(start)
 
 	// Extract requested headers
@@ -187,4 +210,14 @@ func (dl *DomainLimiter) Release(domain string) {
 func (f *HTTPFetcher) Close() {
 	f.client.CloseIdleConnections()
 	log.Info().Msg("HTTP fetcher closed")
+}
+
+// isHTML reports whether a Content-Type is worth parsing for page signals.
+func isHTML(contentType string) bool {
+	ct := strings.ToLower(contentType)
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(ct)
+	return ct == "text/html" || ct == "application/xhtml+xml"
 }
