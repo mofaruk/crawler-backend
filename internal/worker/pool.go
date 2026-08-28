@@ -320,6 +320,27 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 		RedirectedTo: result.RedirectedTo,
 	}
 
+	// Outbound links are recorded separately from the crawl result: link
+	// checking is its own pipeline with its own budget, and a page's link graph
+	// would dwarf the result document if stored inline.
+	if result.Signals != nil && len(result.Signals.Links) > 0 {
+		if external := crawler.ExternalLinks(task.URL, result.Signals.Links); len(external) > 0 {
+			links := make([]models.OutboundLink, 0, len(external))
+			for _, l := range external {
+				links = append(links, models.OutboundLink{
+					URL:     l.URL,
+					FoundOn: []string{l.FoundOn},
+				})
+			}
+
+			// Never fatal to the crawl: link collection is a side benefit, and
+			// the cache report is what the customer is paying for.
+			if err := p.repo.RecordOutboundLinks(ctx, mustObjectID(task.SiteID), links); err != nil {
+				log.Warn().Err(err).Str("url", task.URL).Msg("failed to record outbound links")
+			}
+		}
+	}
+
 	if result.Signals != nil {
 		crawlingResult.Page = &models.PageSignals{
 			Title:            result.Signals.Title,

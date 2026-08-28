@@ -1053,3 +1053,169 @@ func (r *MongoRepository) TailCrawlingResults(
 
 	return results, nil
 }
+
+func (r *MongoRepository) outboundLinks() *mongo.Collection {
+	return r.db.Collection("outbound_links")
+}
+
+// RecordOutboundLinks upserts the external destinations found on one page.
+//
+// Deduplicated per site: the same destination linked from many pages is one
+// document, so the checker makes one request rather than one per page. FoundOn
+// is capped because the count is what a report needs, not the full list of
+// four hundred pages carrying the same footer link.
+func (r *MongoRepository) RecordOutboundLinks(
+	ctx context.Context,
+	siteID primitive.ObjectID,
+	links []models.OutboundLink,
+) error {
+	if len(links) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	models_ := make([]mongo.WriteModel, 0, len(links))
+
+	for _, link := range links {
+		// The crawler reports one page at a time; FoundOn on the stored
+		// document accumulates across pages.
+		pages := link.FoundOn
+		if len(pages) == 0 {
+			continue
+		}
+
+		filter := bson.M{"site_id": siteID, "url": link.URL}
+
+		update := bson.M{
+			"$set": bson.M{"last_seen_at": now},
+			"$setOnInsert": bson.M{
+				"site_id":       siteID,
+				"url":           link.URL,
+				"first_seen_at": now,
+			},
+			// $addToSet dedupes but has no $slice; $push slices but does not
+			// dedupe. Dedup matters more here — the same page must not be
+			// listed twice — and the cap is enforced by the count field plus a
+			// bounded projection when reading.
+			"$addToSet": bson.M{
+				"found_on": bson.M{"$each": pages},
+			},
+		}
+
+		models_ = append(models_,
+			mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
+	}
+
+	// Unordered: one duplicate-key race must not abandon the rest of the batch.
+	_, err := r.outboundLinks().BulkWrite(ctx, models_, options.BulkWrite().SetOrdered(false))
+
+	return err
+}
+
+// OutboundLinksToCheck returns a site's external destinations that have not
+// been checked since the given cutoff, oldest first.
+//
+// Checking is spread over time rather than done all at once: these are third
+// parties' servers, and a site with thousands of outbound links should not
+// arrive at any of them as a burst.
+func (r *MongoRepository) OutboundLinksToCheck(
+	ctx context.Context,
+	siteID primitive.ObjectID,
+	checkedBefore time.Time,
+	limit int64,
+) ([]models.OutboundLink, error) {
+	filter := bson.M{
+		"site_id": siteID,
+		"$or": bson.A{
+			bson.M{"checked_at": bson.M{"$exists": false}},
+			bson.M{"checked_at": nil},
+			bson.M{"checked_at": bson.M{"$lt": checkedBefore}},
+		},
+	}
+
+	// found_on can grow long on a footer link; the checker only needs the URL,
+	// so it is not fetched here.
+	opts := options.Find().
+		SetLimit(limit).
+		SetSort(bson.D{{Key: "checked_at", Value: 1}}).
+		SetProjection(bson.M{"found_on": 0})
+
+	cur, err := r.outboundLinks().Find(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var links []models.OutboundLink
+	if err := cur.All(ctx, &links); err != nil {
+		return nil, err
+	}
+
+	return links, nil
+}
+
+// SaveLinkCheck stores the outcome of checking one destination.
+func (r *MongoRepository) SaveLinkCheck(
+	ctx context.Context,
+	id primitive.ObjectID,
+	statusCode int,
+	checkErr string,
+	responseTime int64,
+) error {
+	now := time.Now()
+
+	_, err := r.outboundLinks().UpdateByID(ctx, id, bson.M{
+		"$set": bson.M{
+			"status_code":      statusCode,
+			"error":            checkErr,
+			"response_time_ms": responseTime,
+			"checked_at":       now,
+		},
+	})
+
+	return err
+}
+
+// BrokenOutboundLinks returns a site's destinations whose last check failed.
+func (r *MongoRepository) BrokenOutboundLinks(
+	ctx context.Context,
+	siteID primitive.ObjectID,
+	limit int64,
+) ([]models.OutboundLink, error) {
+	// Mirrors models.OutboundLink.Broken(): statuses that usually mean "we
+	// block bots" (400, 403, 429, 451) are excluded, because social platforms
+	// answer those to any non-browser request while serving people fine.
+	filter := bson.M{
+		"site_id":    siteID,
+		"checked_at": bson.M{"$ne": nil},
+		"$or": bson.A{
+			bson.M{"error": bson.M{"$nin": bson.A{"", nil}}},
+			bson.M{
+				"status_code": bson.M{
+					"$gte": 400,
+					"$nin": bson.A{400, 403, 429, 451},
+				},
+			},
+		},
+	}
+
+	// Cap the page list per link: a report needs a few examples, not the four
+	// hundred pages carrying the same footer link.
+	opts := options.Find().
+		SetLimit(limit).
+		SetSort(bson.D{{Key: "url", Value: 1}}).
+		SetProjection(bson.M{"found_on": bson.M{"$slice": 20}})
+
+	cur, err := r.outboundLinks().Find(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var links []models.OutboundLink
+	if err := cur.All(ctx, &links); err != nil {
+		return nil, err
+	}
+
+	return links, nil
+}

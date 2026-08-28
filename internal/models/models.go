@@ -174,6 +174,60 @@ type CrawlTask struct {
 	EnqueuedAt  int64    `json:"enqueued_at"`
 }
 
+// --- External Links ---
+
+// OutboundLink is one external destination a site links to, with the pages it
+// was found on.
+//
+// Deduplicated per site rather than per page: a dead supplier link in the
+// footer appears on every page, and checking it four hundred times would be
+// four hundred requests against someone else's server to learn one fact.
+type OutboundLink struct {
+	ID     primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	SiteID primitive.ObjectID `bson:"site_id" json:"site_id"`
+	URL    string             `bson:"url" json:"url"`
+
+	// FoundOn lists the pages linking here, capped when stored — the count is
+	// what matters at scale, not the full list.
+	FoundOn      []string `bson:"found_on" json:"found_on"`
+	FoundOnCount int      `bson:"found_on_count" json:"found_on_count"`
+
+	// Check results, set by the link checker rather than the crawl.
+	StatusCode   int        `bson:"status_code,omitempty" json:"status_code,omitempty"`
+	Error        string     `bson:"error,omitempty" json:"error,omitempty"`
+	ResponseTime int64      `bson:"response_time_ms,omitempty" json:"response_time_ms,omitempty"`
+	CheckedAt    *time.Time `bson:"checked_at,omitempty" json:"checked_at,omitempty"`
+
+	FirstSeenAt time.Time `bson:"first_seen_at" json:"first_seen_at"`
+	LastSeenAt  time.Time `bson:"last_seen_at" json:"last_seen_at"`
+}
+
+// Broken reports whether the last check found the destination unreachable.
+//
+// A transport error or a 404/410/5xx counts. Redirects do not: a link that
+// redirects still gets the visitor somewhere.
+//
+// Statuses that usually mean "we block bots" (400, 403, 429) are deliberately
+// excluded — social platforms answer those to any non-browser request while
+// serving people fine, and reporting a customer's own Facebook page as broken
+// would discredit the whole report.
+func (l OutboundLink) Broken() bool {
+	if l.CheckedAt == nil {
+		return false
+	}
+
+	if l.Error != "" {
+		return true
+	}
+
+	switch l.StatusCode {
+	case 400, 403, 429, 451:
+		return false
+	}
+
+	return l.StatusCode >= 400
+}
+
 // --- API Request/Response DTOs ---
 
 type CreateSiteRequest struct {

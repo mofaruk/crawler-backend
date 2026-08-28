@@ -19,6 +19,7 @@ import (
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
+	"github.com/webkonsulenterne/crawler-backend/internal/linkcheck"
 	"github.com/webkonsulenterne/crawler-backend/internal/discovery"
 	"github.com/webkonsulenterne/crawler-backend/internal/metrics"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
@@ -1538,4 +1539,110 @@ func (h *Handler) TailCrawledURLs(c *gin.Context) {
 		"cursor": cursor,
 		"status": status,
 	})
+}
+
+// --- External Link Checking ---
+
+// CheckSiteLinks verifies a batch of the site's outbound links.
+//
+// Deliberately batched and separate from crawling: these requests go to third
+// parties, so they run on their own budget and are spread over repeated calls
+// rather than hitting every destination at once. Callers poll until `remaining`
+// reaches zero.
+func (h *Handler) CheckSiteLinks(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	site, err := h.repo.GetSite(c.Request.Context(), siteID)
+	if err != nil || site == nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	// A destination checked recently is not worth re-checking: the answer will
+	// not have changed, and it is someone else's server.
+	maxAge, _ := strconv.Atoi(c.DefaultQuery("max_age_hours", "24"))
+	if maxAge <= 0 {
+		maxAge = 24
+	}
+	cutoff := time.Now().Add(-time.Duration(maxAge) * time.Hour)
+
+	pending, err := h.repo.OutboundLinksToCheck(c.Request.Context(), siteID, cutoff, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list links to check")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read links", Code: "INTERNAL"})
+		return
+	}
+
+	if len(pending) == 0 {
+		c.JSON(http.StatusOK, gin.H{"checked": 0, "broken": 0, "remaining": 0})
+		return
+	}
+
+	urls := make([]string, len(pending))
+	for i, l := range pending {
+		urls[i] = l.URL
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+	defer cancel()
+
+	checker := linkcheck.New(site.UserAgent, 15*time.Second)
+	results := checker.CheckAll(ctx, urls, h.cfg.LinkCheckConcurrency)
+
+	broken := 0
+	for i, res := range results {
+		if err := h.repo.SaveLinkCheck(ctx, pending[i].ID, res.StatusCode, res.Error, res.ResponseTime.Milliseconds()); err != nil {
+			log.Warn().Err(err).Str("url", res.URL).Msg("failed to save link check")
+		}
+		// Counted the same way models.OutboundLink.Broken() decides, so the
+		// number here matches what /links/broken later lists.
+		if res.Error != "" || (res.StatusCode >= 400 && !linkcheck.BotBlocked(res.StatusCode)) {
+			broken++
+		}
+	}
+
+	// What is still unchecked after this batch, so the caller knows to continue.
+	stillPending, err := h.repo.OutboundLinksToCheck(c.Request.Context(), siteID, cutoff, 1000)
+	remaining := 0
+	if err == nil {
+		remaining = len(stillPending)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"checked":   len(results),
+		"broken":    broken,
+		"remaining": remaining,
+	})
+}
+
+// GetBrokenLinks lists the site's outbound links whose last check failed.
+func (h *Handler) GetBrokenLinks(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "100"), 10, 64)
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	links, err := h.repo.BrokenOutboundLinks(c.Request.Context(), siteID, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list broken links")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read links", Code: "INTERNAL"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": links, "count": len(links)})
 }

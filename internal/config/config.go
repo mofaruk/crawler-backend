@@ -58,6 +58,10 @@ type Config struct {
 	// AllowPrivateTargets disables the SSRF guard. Local development only.
 	AllowPrivateTargets bool
 
+	// LinkCheckConcurrency bounds how many outbound links are verified at
+	// once. These are third parties' servers, not the customer's.
+	LinkCheckConcurrency int
+
 	// Logging
 	LogLevel string
 }
@@ -116,6 +120,10 @@ func Load() *Config {
 
 		WebhookTimeout:    envDuration("WEBHOOK_TIMEOUT", 10*time.Second),
 		WebhookMaxRetries: envInt("WEBHOOK_MAX_RETRIES", 3),
+
+		// Modest on purpose: these requests go to third parties, so arriving
+		// as a burst is both rude and a good way to get blocked.
+		LinkCheckConcurrency: envInt("LINK_CHECK_CONCURRENCY", 5),
 
 		APIKey:              envStr("API_KEY", ""),
 		AllowedOrigins:      splitAndTrim(envStr("ALLOWED_ORIGINS", "")),

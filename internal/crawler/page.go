@@ -26,6 +26,15 @@ type PageSignals struct {
 	WordCount       int    `bson:"word_count,omitempty" json:"word_count,omitempty"`
 	ImagesMissingAlt int   `bson:"images_missing_alt,omitempty" json:"images_missing_alt,omitempty"`
 	InsecureRefs    int    `bson:"insecure_refs,omitempty" json:"insecure_refs,omitempty"`
+	// Links holds every <a href> exactly as written in the page. Resolving and
+	// classifying them needs the page's own URL, which the parser does not
+	// have, so that is left to the caller.
+	//
+	// Not persisted: this is the raw input to link checking, and storing the
+	// full link graph of every page on every crawl would dwarf the results
+	// themselves.
+	Links []string `bson:"-" json:"-"`
+
 	// SoftNotFound marks a page that returned 200 but reads as an error page.
 	// These are worse than a real 404: search engines index them and users
 	// get no signal that the link is dead.
@@ -129,6 +138,10 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 			case "script", "iframe":
 				if pageIsHTTPS && strings.HasPrefix(strings.ToLower(attrs["src"]), "http://") {
 					s.InsecureRefs++
+				}
+			case "a":
+				if href := strings.TrimSpace(attrs["href"]); href != "" {
+					s.Links = append(s.Links, href)
 				}
 			}
 
