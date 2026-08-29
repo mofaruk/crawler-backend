@@ -278,8 +278,8 @@ func TestParseSitemapReader(t *testing.T) {
 			wantFormat: "urlset",
 		},
 		{
-			name: "malformed tail still returns what was parsed",
-			body: `<urlset><url><loc>https://example.dk/a</loc></url><url><loc>https://exa`,
+			name:       "malformed tail still returns what was parsed",
+			body:       `<urlset><url><loc>https://example.dk/a</loc></url><url><loc>https://exa`,
 			wantURLs:   []string{"https://example.dk/a"},
 			wantFormat: "urlset",
 		},

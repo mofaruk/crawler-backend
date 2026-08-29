@@ -352,9 +352,9 @@ func TestBuildResultsFilterStatusCode(t *testing.T) {
 // make Mongo reject the query outright.
 func TestBuildResultsFilterQuotesTheURLSearch(t *testing.T) {
 	cases := []struct {
-		name  string
-		q     string
-		want  string
+		name   string
+		q      string
+		want   string
 		absent bool
 	}{
 		{name: "plain text", q: "produkter", want: "produkter"},

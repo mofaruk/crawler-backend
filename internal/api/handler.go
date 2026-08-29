@@ -19,8 +19,8 @@ import (
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
-	"github.com/webkonsulenterne/crawler-backend/internal/linkcheck"
 	"github.com/webkonsulenterne/crawler-backend/internal/discovery"
+	"github.com/webkonsulenterne/crawler-backend/internal/linkcheck"
 	"github.com/webkonsulenterne/crawler-backend/internal/metrics"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
 	"github.com/webkonsulenterne/crawler-backend/internal/queue"
@@ -79,6 +79,15 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		})
 		return
 	}
+
+	// Customers type a bare domain, so fill the scheme in before anything
+	// downstream — validation, storage, crawling — sees the value.
+	normalisedBase, err := source.NormalizeSiteURL(req.BaseURL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error(), Code: "INVALID_REQUEST"})
+		return
+	}
+	req.BaseURL = normalisedBase
 
 	// Reject infrastructure targets before anything is persisted: both of
 	// these are fetched server-side, so an unvalidated value is an SSRF.
@@ -188,6 +197,9 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 		update["name"] = *req.Name
 	}
 	if req.BaseURL != nil {
+		if normalised, nerr := source.NormalizeSiteURL(*req.BaseURL); nerr == nil {
+			req.BaseURL = &normalised
+		}
 		if err := source.ValidateTargetURL(*req.BaseURL, h.cfg.AllowPrivateTargets); err != nil {
 			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "base_url rejected: " + err.Error(), Code: "INVALID_TARGET"})
 			return
@@ -302,11 +314,11 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 		log.Error().Err(err).Msg("failed to check for an active crawling")
 	} else if active != nil {
 		c.JSON(http.StatusConflict, gin.H{
-			"error":      "this site is already being crawled",
-			"code":       "ALREADY_RUNNING",
+			"error":       "this site is already being crawled",
+			"code":        "ALREADY_RUNNING",
 			"crawling_id": active.ID.Hex(),
-			"status":     active.Status,
-			"started_at": active.StartedAt,
+			"status":      active.Status,
+			"started_at":  active.StartedAt,
 		})
 		return
 	}
@@ -1398,7 +1410,6 @@ func parsePagination(c *gin.Context) (int64, int64) {
 	}
 	return skip, limit
 }
-
 
 // resolveWindow reads a time window from the query string.
 //

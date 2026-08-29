@@ -51,12 +51,12 @@ func TestParseSrcsetHandlesCommasInsideURLs(t *testing.T) {
 
 func TestParseSrcsetPlainCases(t *testing.T) {
 	cases := map[string][]string{
-		"":                              nil,
-		"   ":                           nil,
-		"a.jpg":                         {"a.jpg"},
-		"a.jpg 1x, b.jpg 2x":            {"a.jpg", "b.jpg"},
-		"a.jpg 400w,b.jpg 800w":         {"a.jpg", "b.jpg"},
-		"  a.jpg 400w ,  b.jpg 800w  ":  {"a.jpg", "b.jpg"},
+		"":                             nil,
+		"   ":                          nil,
+		"a.jpg":                        {"a.jpg"},
+		"a.jpg 1x, b.jpg 2x":           {"a.jpg", "b.jpg"},
+		"a.jpg 400w,b.jpg 800w":        {"a.jpg", "b.jpg"},
+		"  a.jpg 400w ,  b.jpg 800w  ": {"a.jpg", "b.jpg"},
 	}
 
 	for input, want := range cases {

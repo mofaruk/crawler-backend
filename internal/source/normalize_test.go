@@ -31,9 +31,9 @@ func TestNormalizeSiteURL(t *testing.T) {
 	bad := []string{
 		"",
 		"   ",
-		"localhost",          // no dot: internal name or typo
-		"mailto:x@y.dk",      // not a web address
-		"ftp://example.dk",   // not crawlable over http(s)
+		"localhost",        // no dot: internal name or typo
+		"mailto:x@y.dk",    // not a web address
+		"ftp://example.dk", // not crawlable over http(s)
 		".example.dk",
 		"example.dk.",
 	}

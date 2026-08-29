@@ -41,10 +41,10 @@ const maxSitemapDepth = 5
 // to surface it. When the URL list comes back empty, Diagnosis() turns these
 // counters into a human-readable reason suitable for an end-user error log.
 type ParseStats struct {
-	SourceURL     string `json:"source_url"`
-	SourceType    string `json:"source_type"`
-	HTTPStatus    int    `json:"http_status,omitempty"`
-	ContentBytes  int64  `json:"content_bytes"` // bytes read from the root document
+	SourceURL    string `json:"source_url"`
+	SourceType   string `json:"source_type"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	ContentBytes int64  `json:"content_bytes"` // bytes read from the root document
 
 	// CSV-specific counters.
 	CSVRowsScanned int `json:"csv_rows_scanned,omitempty"`
@@ -53,7 +53,7 @@ type ParseStats struct {
 	CSVEmptyRows   int `json:"csv_empty_rows,omitempty"`
 
 	// XML-specific counters.
-	XMLFormat          string `json:"xml_format,omitempty"`        // "urlset", "sitemapindex", "mixed", "unknown"
+	XMLFormat          string `json:"xml_format,omitempty"`         // "urlset", "sitemapindex", "mixed", "unknown"
 	XMLDocumentsRead   int    `json:"xml_documents_read,omitempty"` // root + child sitemaps successfully fetched
 	XMLDocumentsFailed int    `json:"xml_documents_failed,omitempty"`
 	XMLChildSitemaps   int    `json:"xml_child_sitemaps,omitempty"` // <sitemap><loc> entries observed
@@ -63,8 +63,8 @@ type ParseStats struct {
 	// XMLImageEntries counts <image:image><image:loc> URLs taken from the
 	// sitemap. Reported separately so it is visible how much of a crawl is
 	// images rather than pages.
-	XMLImageEntries int `json:"xml_image_entries,omitempty"`
-	XMLParseError      string `json:"xml_parse_error,omitempty"` // first non-EOF decoder error on the root document
+	XMLImageEntries int    `json:"xml_image_entries,omitempty"`
+	XMLParseError   string `json:"xml_parse_error,omitempty"` // first non-EOF decoder error on the root document
 
 	// Common — apply to both CSV first-column URLs and XML <loc>s.
 	URLsAccepted        int `json:"urls_accepted"`

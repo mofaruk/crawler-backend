@@ -36,9 +36,9 @@ func NewHTTPFetcher(cfg *config.Config) *HTTPFetcher {
 		MaxIdleConnsPerHost:   50,
 		MaxConnsPerHost:       50,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:  10 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: cfg.CrawlerTimeout,
-		TLSClientConfig:      &tls.Config{InsecureSkipVerify: false},
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: false},
 	}
 
 	return &HTTPFetcher{

@@ -220,8 +220,8 @@ func TestTitleLengthBoundaries(t *testing.T) {
 // worth pinning so the coupling is explicit.
 func TestTitleThresholdsUseTitleLengthField(t *testing.T) {
 	p := healthyPage()
-	p.Title = "short"     // 5 characters
-	p.TitleLength = 40    // but the stored length says otherwise
+	p.Title = "short"  // 5 characters
+	p.TitleLength = 40 // but the stored length says otherwise
 	issues := ClassifyURL(URLState{URL: "u", StatusCode: 200, Page: p}, nil)
 	if _, ok := issueByKind(issues, "short_title"); ok {
 		t.Fatal("classifier must trust TitleLength, not len(Title)")

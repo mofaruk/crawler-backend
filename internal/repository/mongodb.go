@@ -140,11 +140,13 @@ func (r *MongoRepository) ensureIndexes(ctx context.Context) error {
 
 // --- Collection Accessors ---
 
-func (r *MongoRepository) sites() *mongo.Collection       { return r.db.Collection("sites") }
-func (r *MongoRepository) crawlings() *mongo.Collection   { return r.db.Collection("crawlings") }
-func (r *MongoRepository) crawlURLs() *mongo.Collection   { return r.db.Collection("crawl_urls") }
-func (r *MongoRepository) crawlingResults() *mongo.Collection { return r.db.Collection("crawling_results") }
-func (r *MongoRepository) crawlFailures() *mongo.Collection  { return r.db.Collection("crawl_failures") }
+func (r *MongoRepository) sites() *mongo.Collection     { return r.db.Collection("sites") }
+func (r *MongoRepository) crawlings() *mongo.Collection { return r.db.Collection("crawlings") }
+func (r *MongoRepository) crawlURLs() *mongo.Collection { return r.db.Collection("crawl_urls") }
+func (r *MongoRepository) crawlingResults() *mongo.Collection {
+	return r.db.Collection("crawling_results")
+}
+func (r *MongoRepository) crawlFailures() *mongo.Collection { return r.db.Collection("crawl_failures") }
 
 // --- Site Operations ---
 
@@ -320,8 +322,8 @@ func (r *MongoRepository) UpdateCrawlingProgress(ctx context.Context, id primiti
 func (r *MongoRepository) SetCrawlingTotalURLs(ctx context.Context, id primitive.ObjectID, total int) error {
 	_, err := r.crawlings().UpdateByID(ctx, id, bson.M{
 		"$set": bson.M{
-			"total_urls":  total,
-			"updated_at":  time.Now(),
+			"total_urls": total,
+			"updated_at": time.Now(),
 		},
 	})
 	return err
@@ -533,10 +535,11 @@ func (r *MongoRepository) GetSiteStatusAnalytics(ctx context.Context, siteID pri
 //
 // Everything here comes from stored results — no extra crawling — and each
 // series answers a different question:
-//   · cache coverage      is the CDN doing its job
-//   · median age          how stale is what visitors receive
-//   · response time       is the origin (or edge) getting slower
-//   · errors              is the site breaking
+//
+//	· cache coverage      is the CDN doing its job
+//	· median age          how stale is what visitors receive
+//	· response time       is the origin (or edge) getting slower
+//	· errors              is the site breaking
 //
 // Plotted together they separate causes that a single number conflates: cache
 // falling while response time rises is a CDN problem; both steady while errors
@@ -602,10 +605,10 @@ func (r *MongoRepository) GetSiteTimeline(ctx context.Context, siteID primitive.
 	points := make([]models.TimelinePoint, 0, len(raw))
 	for _, p := range raw {
 		point := models.TimelinePoint{
-			CrawlingID:   p.CrawlingID.Hex(),
-			CrawledAt:    p.CrawledAt,
-			URLs:         p.Total,
-			Errors:       p.Errors,
+			CrawlingID:    p.CrawlingID.Hex(),
+			CrawledAt:     p.CrawledAt,
+			URLs:          p.Total,
+			Errors:        p.Errors,
 			AvgResponseMs: int64(p.AvgResponse),
 		}
 

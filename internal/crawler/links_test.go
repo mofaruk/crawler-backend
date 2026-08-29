@@ -9,11 +9,11 @@ import (
 // here would duplicate findings and double the checking work.
 func TestExternalLinksExcludesSameSite(t *testing.T) {
 	got := ExternalLinks("https://billigfilter.dk/produkter", []string{
-		"/kontakt",                          // relative
-		"https://billigfilter.dk/om-os",     // absolute, same host
-		"https://www.billigfilter.dk/blog",  // www variant of the same site
+		"/kontakt",                         // relative
+		"https://billigfilter.dk/om-os",    // absolute, same host
+		"https://www.billigfilter.dk/blog", // www variant of the same site
 		"//billigfilter.dk/protocol-relative",
-		"https://leverandor.dk/produkt",     // external
+		"https://leverandor.dk/produkt", // external
 	})
 
 	if len(got) != 1 {

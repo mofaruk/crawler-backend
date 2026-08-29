@@ -59,7 +59,7 @@ type Site struct {
 	// carries their last result forward. On a site that is 95% cached this
 	// avoids almost all the work — at the cost of not learning whether those
 	// pages are *still* cached, which is why it is opt-in per site.
-	SmartRecrawl  bool               `bson:"smart_recrawl" json:"smart_recrawl"`
+	SmartRecrawl bool `bson:"smart_recrawl" json:"smart_recrawl"`
 
 	// URLsBuiltAt is when the stored URL list was last rebuilt. Nil means no
 	// list has been built yet, so the next crawl derives one.
@@ -71,29 +71,29 @@ type Site struct {
 	// site, 341 pages reference 13,209 assets, most of them responsive
 	// variants of the same image. Warming all of them is 39x the work of
 	// crawling the pages alone, so this is a choice rather than a default.
-	AssetMode string `bson:"asset_mode" json:"asset_mode"`
-	CreatedAt     time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt     time.Time          `bson:"updated_at" json:"updated_at"`
+	AssetMode string    `bson:"asset_mode" json:"asset_mode"`
+	CreatedAt time.Time `bson:"created_at" json:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at" json:"updated_at"`
 }
 
 // --- Crawling (Job) ---
 
 type Crawling struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	SiteID         primitive.ObjectID `bson:"site_id" json:"site_id"`
-	Status         CrawlStatus        `bson:"status" json:"status"`
-	Speed          int                `bson:"speed" json:"speed"`                       // URLs per hour
-	ReloadSource   bool               `bson:"reload_source" json:"reload_source"`
-	URLType        string             `bson:"url_type,omitempty" json:"url_type,omitempty"` // "all" | "static" | "dynamic"
-	TotalURLs      int                `bson:"total_urls" json:"total_urls"`
-	CrawledURLs    int                `bson:"crawled_urls" json:"crawled_urls"`
-	FailedURLs     int                `bson:"failed_urls" json:"failed_urls"`
-	StartedAt      *time.Time         `bson:"started_at,omitempty" json:"started_at,omitempty"`
-	CompletedAt    *time.Time         `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
-	PausedAt       *time.Time         `bson:"paused_at,omitempty" json:"paused_at,omitempty"`
-	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
-	ErrorMessage   string             `bson:"error_message,omitempty" json:"error_message,omitempty"`
+	ID           primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	SiteID       primitive.ObjectID `bson:"site_id" json:"site_id"`
+	Status       CrawlStatus        `bson:"status" json:"status"`
+	Speed        int                `bson:"speed" json:"speed"` // URLs per hour
+	ReloadSource bool               `bson:"reload_source" json:"reload_source"`
+	URLType      string             `bson:"url_type,omitempty" json:"url_type,omitempty"` // "all" | "static" | "dynamic"
+	TotalURLs    int                `bson:"total_urls" json:"total_urls"`
+	CrawledURLs  int                `bson:"crawled_urls" json:"crawled_urls"`
+	FailedURLs   int                `bson:"failed_urls" json:"failed_urls"`
+	StartedAt    *time.Time         `bson:"started_at,omitempty" json:"started_at,omitempty"`
+	CompletedAt  *time.Time         `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	PausedAt     *time.Time         `bson:"paused_at,omitempty" json:"paused_at,omitempty"`
+	CreatedAt    time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt    time.Time          `bson:"updated_at" json:"updated_at"`
+	ErrorMessage string             `bson:"error_message,omitempty" json:"error_message,omitempty"`
 }
 
 // --- Crawl URL ---
@@ -128,8 +128,8 @@ type CrawlingResult struct {
 	SiteID       primitive.ObjectID     `bson:"site_id" json:"site_id"`
 	URL          string                 `bson:"url" json:"url"`
 	StatusCode   int                    `bson:"status_code" json:"status_code"`
-	Headers      map[string]string      `bson:"headers" json:"headers"`        // extracted headers
-	BodyData     map[string]interface{} `bson:"body_data" json:"body_data"`    // extracted body fields
+	Headers      map[string]string      `bson:"headers" json:"headers"`     // extracted headers
+	BodyData     map[string]interface{} `bson:"body_data" json:"body_data"` // extracted body fields
 	ContentType  string                 `bson:"content_type" json:"content_type"`
 	ResponseTime int64                  `bson:"response_time_ms" json:"response_time_ms"`
 	CrawledAt    time.Time              `bson:"crawled_at" json:"crawled_at"`
@@ -379,8 +379,11 @@ func (l OutboundLink) Broken() bool {
 // --- API Request/Response DTOs ---
 
 type CreateSiteRequest struct {
-	Name          string `json:"name" binding:"required"`
-	BaseURL       string `json:"base_url" binding:"required,url"`
+	Name string `json:"name" binding:"required"`
+	// Not binding:"url": customers type a bare domain, which the handler
+	// normalises. The url rule rejected "billigventilation.dk" outright,
+	// so the API refused exactly what the product tells people to enter.
+	BaseURL       string `json:"base_url" binding:"required"`
 	URLLimit      int    `json:"url_limit" binding:"required,min=1"`
 	URLSource     string `json:"url_source" binding:"omitempty,url"` // required unless url_source_type is "auto"
 	URLSourceType string `json:"url_source_type" binding:"required,oneof=csv xml auto smart"`
@@ -392,7 +395,7 @@ type CreateSiteRequest struct {
 
 type UpdateSiteRequest struct {
 	Name          *string `json:"name"`
-	BaseURL       *string `json:"base_url" binding:"omitempty,url"`
+	BaseURL       *string `json:"base_url"`
 	URLLimit      *int    `json:"url_limit" binding:"omitempty,min=1"`
 	URLSource     *string `json:"url_source" binding:"omitempty,url"`
 	URLSourceType *string `json:"url_source_type" binding:"omitempty,oneof=csv xml auto smart"`
@@ -430,8 +433,8 @@ type CrawlProgressResponse struct {
 }
 
 type ErrorResponse struct {
-	Error   string `json:"error"`
-	Code    string `json:"code,omitempty"`
+	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
 }
 
 type HeaderValueCount struct {
@@ -469,8 +472,8 @@ const (
 type SiteIssue struct {
 	URL         string    `json:"url"`
 	Kind        string    `json:"kind"`
-	Title       string    `json:"title"`             // human-readable summary
-	Detail      string    `json:"detail,omitempty"`  // the specific value found
+	Title       string    `json:"title"`            // human-readable summary
+	Detail      string    `json:"detail,omitempty"` // the specific value found
 	Severity    int       `json:"severity"`
 	StatusCode  int       `json:"status_code,omitempty"`
 	FirstSeen   time.Time `json:"first_seen"`
@@ -482,10 +485,10 @@ type SiteIssue struct {
 // stylistic preferences: a 4-second page is slow by any standard, whereas a
 // 55-character title is fine even though SEO tools like 50-60.
 const (
-	slowPageMs      = 2000
-	verySlowPageMs  = 5000
-	shortTitleChars = 10
-	longTitleChars  = 70
+	slowPageMs       = 2000
+	verySlowPageMs   = 5000
+	shortTitleChars  = 10
+	longTitleChars   = 70
 	thinContentWords = 100
 )
 

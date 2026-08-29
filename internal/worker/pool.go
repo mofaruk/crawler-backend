@@ -524,7 +524,6 @@ func mustObjectID(hex string) primitive.ObjectID {
 	return id
 }
 
-
 // queueAssets adds a page's asset references to the running crawl.
 //
 // Same-host only: a CDN or a third party's images are not the customer's cache

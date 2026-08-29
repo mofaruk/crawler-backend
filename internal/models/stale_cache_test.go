@@ -9,11 +9,11 @@ import "testing"
 // such page as stale.
 func TestCacheFreshnessPrefersSMaxAge(t *testing.T) {
 	cases := []struct {
-		name        string
-		headers     map[string]string
-		wantAge     int
-		wantMaxAge  int
-		wantOK      bool
+		name       string
+		headers    map[string]string
+		wantAge    int
+		wantMaxAge int
+		wantOK     bool
 	}{
 		{
 			name:       "s-maxage wins over max-age",
@@ -66,15 +66,15 @@ func TestCacheFreshnessPrefersSMaxAge(t *testing.T) {
 // as well would be noise.
 func TestCacheFreshnessUndeterminable(t *testing.T) {
 	cases := map[string]map[string]string{
-		"no Age header":        {"Cache-Control": "max-age=600"},
-		"no Cache-Control":     {"Age": "100"},
-		"neither":              {},
-		"no-store":             {"Age": "100", "Cache-Control": "no-store, max-age=600"},
-		"no-cache":             {"Age": "100", "Cache-Control": "no-cache"},
+		"no Age header":         {"Cache-Control": "max-age=600"},
+		"no Cache-Control":      {"Age": "100"},
+		"neither":               {},
+		"no-store":              {"Age": "100", "Cache-Control": "no-store, max-age=600"},
+		"no-cache":              {"Age": "100", "Cache-Control": "no-cache"},
 		"no lifetime directive": {"Age": "100", "Cache-Control": "public, must-revalidate"},
-		"unparseable Age":      {"Age": "soon", "Cache-Control": "max-age=600"},
-		"negative Age":         {"Age": "-5", "Cache-Control": "max-age=600"},
-		"unparseable max-age":  {"Age": "100", "Cache-Control": "max-age=forever"},
+		"unparseable Age":       {"Age": "soon", "Cache-Control": "max-age=600"},
+		"negative Age":          {"Age": "-5", "Cache-Control": "max-age=600"},
+		"unparseable max-age":   {"Age": "100", "Cache-Control": "max-age=forever"},
 	}
 
 	for name, headers := range cases {
@@ -104,7 +104,7 @@ func TestClassifyReportsStaleCache(t *testing.T) {
 		StatusCode: 200,
 		Headers: map[string]string{
 			"CF-Cache-Status": "HIT",
-			"Age":             "7200",           // 2 hours old
+			"Age":             "7200",                // 2 hours old
 			"Cache-Control":   "public, max-age=600", // 10 minutes allowed
 		},
 	}
@@ -153,8 +153,8 @@ func TestStaleCacheSeverityScalesWithOverrun(t *testing.T) {
 		age  string
 		want int
 	}{
-		{name: "moderately over is a warning", age: "1200", want: SeverityWarning},   // 2x
-		{name: "far over is critical", age: "600000", want: SeverityCritical},        // 1000x
+		{name: "moderately over is a warning", age: "1200", want: SeverityWarning}, // 2x
+		{name: "far over is critical", age: "600000", want: SeverityCritical},      // 1000x
 	}
 
 	for _, tc := range cases {

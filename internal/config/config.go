@@ -26,9 +26,9 @@ type Config struct {
 	RedisDB       int
 
 	// Worker settings
-	WorkerConcurrency int
+	WorkerConcurrency  int
 	WorkerPollInterval time.Duration
-	WorkerBatchSize   int
+	WorkerBatchSize    int
 
 	// Crawler settings
 	CrawlerTimeout    time.Duration
@@ -42,7 +42,7 @@ type Config struct {
 	MetricsPort string
 
 	// Webhook
-	WebhookTimeout   time.Duration
+	WebhookTimeout    time.Duration
 	WebhookMaxRetries int
 
 	// Security

@@ -16,16 +16,16 @@ import (
 // memory and no extra requests, which is what makes broad page-quality
 // detection affordable here.
 type PageSignals struct {
-	Title           string `bson:"title,omitempty" json:"title,omitempty"`
-	TitleLength     int    `bson:"title_length,omitempty" json:"title_length,omitempty"`
-	MetaDescription string `bson:"meta_description,omitempty" json:"meta_description,omitempty"`
-	MetaDescLength  int    `bson:"meta_desc_length,omitempty" json:"meta_desc_length,omitempty"`
-	Canonical       string `bson:"canonical,omitempty" json:"canonical,omitempty"`
-	NoIndex         bool   `bson:"noindex,omitempty" json:"noindex,omitempty"`
-	H1Count         int    `bson:"h1_count,omitempty" json:"h1_count,omitempty"`
-	WordCount       int    `bson:"word_count,omitempty" json:"word_count,omitempty"`
-	ImagesMissingAlt int   `bson:"images_missing_alt,omitempty" json:"images_missing_alt,omitempty"`
-	InsecureRefs    int    `bson:"insecure_refs,omitempty" json:"insecure_refs,omitempty"`
+	Title            string `bson:"title,omitempty" json:"title,omitempty"`
+	TitleLength      int    `bson:"title_length,omitempty" json:"title_length,omitempty"`
+	MetaDescription  string `bson:"meta_description,omitempty" json:"meta_description,omitempty"`
+	MetaDescLength   int    `bson:"meta_desc_length,omitempty" json:"meta_desc_length,omitempty"`
+	Canonical        string `bson:"canonical,omitempty" json:"canonical,omitempty"`
+	NoIndex          bool   `bson:"noindex,omitempty" json:"noindex,omitempty"`
+	H1Count          int    `bson:"h1_count,omitempty" json:"h1_count,omitempty"`
+	WordCount        int    `bson:"word_count,omitempty" json:"word_count,omitempty"`
+	ImagesMissingAlt int    `bson:"images_missing_alt,omitempty" json:"images_missing_alt,omitempty"`
+	InsecureRefs     int    `bson:"insecure_refs,omitempty" json:"insecure_refs,omitempty"`
 	// Assets holds every image, stylesheet, script and media URL the page
 	// references, exactly as written. Warming these is the point: a sitemap
 	// lists pages and (at best) original-size images, but a visitor fetches
@@ -73,7 +73,7 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 		// inline analytics blob or a JSON-LD block push an otherwise empty page
 		// past the thin-content threshold, so the page never gets reported.
 		inScript bool
-		words   int
+		words    int
 	)
 
 	for {

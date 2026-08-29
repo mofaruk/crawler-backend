@@ -22,7 +22,7 @@ import (
 
 // Default knobs. Tuned for politeness on a single target host.
 const (
-	defaultConcurrency = 5
+	defaultConcurrency  = 5
 	defaultFetchTimeout = 30 * time.Second
 	defaultMaxBodyBytes = 8 * 1024 * 1024 // 8 MB cap for HTML parsing
 	taskQueueBuffer     = 1024
@@ -85,13 +85,13 @@ func (d *Discoverer) Discover(ctx context.Context, baseURL string, limit int, em
 	seedHost := strings.ToLower(base.Host)
 
 	state := &discoverState{
-		ctx:       ctx,
-		seedHost:  seedHost,
-		seen:      make(map[string]struct{}, 1024),
-		tasks:     make(chan *url.URL, taskQueueBuffer),
-		limit:     limit,
-		emit:      emit,
-		fetcher:   d,
+		ctx:      ctx,
+		seedHost: seedHost,
+		seen:     make(map[string]struct{}, 1024),
+		tasks:    make(chan *url.URL, taskQueueBuffer),
+		limit:    limit,
+		emit:     emit,
+		fetcher:  d,
 	}
 
 	// Launch HTML-fetch workers. Each waits on tasks; new tasks come from

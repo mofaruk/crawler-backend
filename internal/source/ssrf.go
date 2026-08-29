@@ -70,17 +70,17 @@ func isPublicIP(ip net.IP) bool {
 
 	// Ranges net.IP's helpers do not cover.
 	for _, cidr := range []string{
-		"100.64.0.0/10",  // RFC 6598 carrier-grade NAT
-		"192.0.0.0/24",   // RFC 6890 IETF protocol assignments
-		"192.0.2.0/24",   // TEST-NET-1
-		"198.18.0.0/15",  // benchmarking
-		"198.51.100.0/24",// TEST-NET-2
-		"203.0.113.0/24", // TEST-NET-3
-		"240.0.0.0/4",    // reserved
-		"::/128",         // unspecified
-		"64:ff9b::/96",   // IPv4/IPv6 translation
-		"100::/64",       // discard-only
-		"2001:db8::/32",  // documentation
+		"100.64.0.0/10",   // RFC 6598 carrier-grade NAT
+		"192.0.0.0/24",    // RFC 6890 IETF protocol assignments
+		"192.0.2.0/24",    // TEST-NET-1
+		"198.18.0.0/15",   // benchmarking
+		"198.51.100.0/24", // TEST-NET-2
+		"203.0.113.0/24",  // TEST-NET-3
+		"240.0.0.0/4",     // reserved
+		"::/128",          // unspecified
+		"64:ff9b::/96",    // IPv4/IPv6 translation
+		"100::/64",        // discard-only
+		"2001:db8::/32",   // documentation
 	} {
 		if _, block, err := net.ParseCIDR(cidr); err == nil && block.Contains(ip) {
 			return false
