@@ -26,6 +26,16 @@ type PageSignals struct {
 	WordCount       int    `bson:"word_count,omitempty" json:"word_count,omitempty"`
 	ImagesMissingAlt int   `bson:"images_missing_alt,omitempty" json:"images_missing_alt,omitempty"`
 	InsecureRefs    int    `bson:"insecure_refs,omitempty" json:"insecure_refs,omitempty"`
+	// Assets holds every image, stylesheet, script and media URL the page
+	// references, exactly as written. Warming these is the point: a sitemap
+	// lists pages and (at best) original-size images, but a visitor fetches
+	// the responsive variant — on one real customer site the sitemap covered
+	// 771 images while the pages actually referenced 3,565, the difference
+	// being mostly -800x600-style thumbnails that live only in srcset.
+	//
+	// Not persisted, same as Links: this is input to warming, not a report.
+	Assets []string `bson:"-" json:"-"`
+
 	// Links holds every <a href> exactly as written in the page. Resolving and
 	// classifying them needs the page's own URL, which the parser does not
 	// have, so that is left to the caller.
@@ -126,6 +136,13 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 				if strings.EqualFold(attrs["rel"], "canonical") {
 					s.Canonical = strings.TrimSpace(attrs["href"])
 				}
+				// Stylesheets, preloaded fonts and icons: all fetched by a
+				// visitor, none listed in a sitemap.
+				switch strings.ToLower(strings.TrimSpace(attrs["rel"])) {
+				case "stylesheet", "preload", "icon", "apple-touch-icon", "shortcut icon":
+					s.addAsset(attrs["href"])
+					s.addAssets(parseSrcset(attrs["imagesrcset"]))
+				}
 			case "img":
 				if strings.TrimSpace(attrs["alt"]) == "" {
 					s.ImagesMissingAlt++
@@ -135,9 +152,26 @@ func ExtractPageSignals(r io.Reader, pageIsHTTPS bool) PageSignals {
 				if pageIsHTTPS && strings.HasPrefix(strings.ToLower(attrs["src"]), "http://") {
 					s.InsecureRefs++
 				}
+				s.addAsset(attrs["src"])
+				// srcset is where the responsive variants live, and those are
+				// what a visitor on a phone actually downloads.
+				s.addAssets(parseSrcset(attrs["srcset"]))
+				// Lazy-loading themes and plugins put the real URL here and
+				// leave src as a placeholder.
+				s.addAsset(attrs["data-src"])
+				s.addAssets(parseSrcset(attrs["data-srcset"]))
+			case "source":
+				s.addAsset(attrs["src"])
+				s.addAssets(parseSrcset(attrs["srcset"]))
+			case "video", "audio":
+				s.addAsset(attrs["src"])
+				s.addAsset(attrs["poster"])
 			case "script", "iframe":
 				if pageIsHTTPS && strings.HasPrefix(strings.ToLower(attrs["src"]), "http://") {
 					s.InsecureRefs++
+				}
+				if tag == "script" {
+					s.addAsset(attrs["src"])
 				}
 			case "a":
 				if href := strings.TrimSpace(attrs["href"]); href != "" {
@@ -188,4 +222,81 @@ func looksLikeNotFound(title string) bool {
 	}
 
 	return false
+}
+
+// addAsset records one asset reference, ignoring anything unusable.
+func (s *PageSignals) addAsset(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "#") {
+		return
+	}
+
+	// data: URIs are the bytes themselves — there is nothing to fetch, and
+	// they can be enormous.
+	if strings.HasPrefix(strings.ToLower(raw), "data:") {
+		return
+	}
+
+	s.Assets = append(s.Assets, raw)
+}
+
+func (s *PageSignals) addAssets(raws []string) {
+	for _, raw := range raws {
+		s.addAsset(raw)
+	}
+}
+
+// parseSrcset pulls the URLs out of a srcset attribute.
+//
+// srcset is "url descriptor, url descriptor, …", but a URL may itself contain
+// a comma — WordPress and CDNs emit them in query strings routinely
+// (…?resize=800,600). Splitting naively on commas truncates those, so this
+// walks the value and only treats a comma as a separator once a descriptor or
+// whitespace has been seen since the last URL started.
+func parseSrcset(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	var (
+		out     []string
+		current strings.Builder
+		// Whether we are past the URL and into its descriptor ("800w", "2x"),
+		// which is the only place a comma legitimately separates candidates.
+		inDescriptor bool
+	)
+
+	flush := func() {
+		field := strings.TrimSpace(current.String())
+		current.Reset()
+		inDescriptor = false
+
+		if field == "" {
+			return
+		}
+		// Keep only the URL, discarding the descriptor.
+		if i := strings.IndexAny(field, " \t\n\r"); i > 0 {
+			field = field[:i]
+		}
+		out = append(out, field)
+	}
+
+	for _, r := range value {
+		switch {
+		case r == ',' && inDescriptor:
+			flush()
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			if current.Len() > 0 {
+				inDescriptor = true
+			}
+			current.WriteRune(r)
+		default:
+			current.WriteRune(r)
+		}
+	}
+
+	flush()
+
+	return out
 }

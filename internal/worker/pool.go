@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/crawler"
+	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
 	"github.com/webkonsulenterne/crawler-backend/internal/metrics"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
 	"github.com/webkonsulenterne/crawler-backend/internal/queue"
@@ -48,6 +51,7 @@ type Pool struct {
 	rateLimiter  *ratelimiter.DistributedRateLimiter
 	fetcher      *crawler.HTTPFetcher
 	repo         *repository.MongoRepository
+	dedup        *dedup.Deduplicator
 
 	workCh        chan dispatchedTask
 	activeWorkers atomic.Int64
@@ -62,6 +66,7 @@ func NewPool(
 	rl *ratelimiter.DistributedRateLimiter,
 	fetcher *crawler.HTTPFetcher,
 	repo *repository.MongoRepository,
+	dd *dedup.Deduplicator,
 ) *Pool {
 	return &Pool{
 		cfg:          cfg,
@@ -70,6 +75,7 @@ func NewPool(
 		rateLimiter:  rl,
 		fetcher:      fetcher,
 		repo:         repo,
+		dedup:        dd,
 	}
 }
 
@@ -320,6 +326,14 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 		RedirectedTo: result.RedirectedTo,
 	}
 
+	// Assets the page references — images, stylesheets, scripts, fonts. A
+	// sitemap lists pages and at best original-size images, but a visitor
+	// fetches the responsive variant, so warming only what the sitemap names
+	// leaves most of what people actually wait for cold.
+	if result.Signals != nil && len(result.Signals.Assets) > 0 {
+		p.queueAssets(ctx, crawlingID, task, result.Signals.Assets)
+	}
+
 	// Outbound links are recorded separately from the crawl result: link
 	// checking is its own pipeline with its own budget, and a page's link graph
 	// would dwarf the result document if stored inline.
@@ -508,4 +522,101 @@ func mustObjectID(hex string) primitive.ObjectID {
 		return primitive.NilObjectID
 	}
 	return id
+}
+
+
+// queueAssets adds a page's asset references to the running crawl.
+//
+// Same-host only: a CDN or a third party's images are not the customer's cache
+// to warm, and fetching them would spend the crawl's budget on someone else's
+// infrastructure. Deduplicated against the same set the sitemap URLs used, so
+// a logo referenced from every page is fetched once.
+func (p *Pool) queueAssets(ctx context.Context, crawlingID string, task *models.CrawlTask, refs []string) {
+	page, err := url.Parse(task.URL)
+	if err != nil || page.Host == "" {
+		return
+	}
+
+	// The site's url_limit is a promise about how many requests a crawl makes
+	// against the customer's origin. Assets are requests, so discovery stops
+	// once the crawl has as many URLs as the limit allows.
+	var limit int
+	if oid, err := primitive.ObjectIDFromHex(task.SiteID); err == nil {
+		if site, err := p.repo.GetSite(ctx, oid); err == nil && site != nil {
+			limit = site.URLLimit
+		}
+	}
+
+	// Counted once and tracked locally: a Count per asset would be hundreds of
+	// Redis round trips per page. Slight overshoot when several pages queue
+	// assets at the same moment is acceptable — the limit guards the customer's
+	// origin from a runaway crawl, not an exact quota.
+	var remaining int
+	if limit > 0 {
+		seen, err := p.dedup.Count(ctx, crawlingID)
+		if err != nil {
+			return
+		}
+		if seen >= int64(limit) {
+			return
+		}
+		remaining = limit - int(seen)
+	}
+
+	var tasks []models.CrawlTask
+
+	for _, raw := range refs {
+		if limit > 0 && len(tasks) >= remaining {
+			break
+		}
+
+		ref, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+
+		target := page.ResolveReference(ref)
+		if target.Scheme != "http" && target.Scheme != "https" {
+			continue
+		}
+		if !strings.EqualFold(target.Host, page.Host) {
+			continue
+		}
+
+		// The fragment is a position within a file, not a separate one.
+		target.Fragment = ""
+		assetURL := target.String()
+
+		urlHash := dedup.HashURL(assetURL)
+		isNew, err := p.dedup.MarkSeen(ctx, crawlingID, urlHash)
+		if err != nil || !isNew {
+			continue
+		}
+
+		tasks = append(tasks, models.CrawlTask{
+			CrawlingID:  crawlingID,
+			SiteID:      task.SiteID,
+			URL:         assetURL,
+			URLHash:     urlHash,
+			UserAgent:   task.UserAgent,
+			ExtractData: task.ExtractData,
+			MaxRetries:  p.cfg.CrawlerMaxRetries,
+			EnqueuedAt:  time.Now().Unix(),
+		})
+	}
+
+	if len(tasks) == 0 {
+		return
+	}
+
+	if err := p.queue.EnqueueBatch(ctx, crawlingID, tasks); err != nil {
+		log.Warn().Err(err).Int("assets", len(tasks)).Msg("failed to queue page assets")
+		return
+	}
+
+	// The progress bar counts what will actually be fetched, so the total has
+	// to grow as assets are discovered rather than only counting sitemap URLs.
+	if oid, err := primitive.ObjectIDFromHex(crawlingID); err == nil {
+		_ = p.repo.IncCrawlingTotalURLs(ctx, oid, len(tasks))
+	}
 }

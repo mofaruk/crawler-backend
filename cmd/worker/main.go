@@ -14,6 +14,7 @@ import (
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/crawler"
+	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
 	"github.com/webkonsulenterne/crawler-backend/internal/metrics"
 	"github.com/webkonsulenterne/crawler-backend/internal/queue"
 	"github.com/webkonsulenterne/crawler-backend/internal/ratelimiter"
@@ -65,9 +66,13 @@ func main() {
 	sm := queue.NewJobStateManager(rdb)
 	rl := ratelimiter.NewDistributedRateLimiter(rdb)
 	fetcher := crawler.NewHTTPFetcher(cfg)
+	// Shared with the API's ingestion path: assets harvested from a page are
+	// deduped against the same set the sitemap URLs were, so an image
+	// referenced from two hundred pages is queued once.
+	dd := dedup.NewDeduplicator(rdb)
 
 	// Create worker pool
-	pool := worker.NewPool(cfg, q, sm, rl, fetcher, repo)
+	pool := worker.NewPool(cfg, q, sm, rl, fetcher, repo, dd)
 
 	// --- Metrics Server ---
 	metricsSrv := &http.Server{
