@@ -4,15 +4,19 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/crawler"
+	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
 	"github.com/webkonsulenterne/crawler-backend/internal/metrics"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
 	"github.com/webkonsulenterne/crawler-backend/internal/queue"
@@ -47,6 +51,7 @@ type Pool struct {
 	rateLimiter  *ratelimiter.DistributedRateLimiter
 	fetcher      *crawler.HTTPFetcher
 	repo         *repository.MongoRepository
+	dedup        *dedup.Deduplicator
 
 	workCh        chan dispatchedTask
 	activeWorkers atomic.Int64
@@ -61,6 +66,7 @@ func NewPool(
 	rl *ratelimiter.DistributedRateLimiter,
 	fetcher *crawler.HTTPFetcher,
 	repo *repository.MongoRepository,
+	dd *dedup.Deduplicator,
 ) *Pool {
 	return &Pool{
 		cfg:          cfg,
@@ -69,6 +75,7 @@ func NewPool(
 		rateLimiter:  rl,
 		fetcher:      fetcher,
 		repo:         repo,
+		dedup:        dd,
 	}
 }
 
@@ -290,15 +297,8 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 	if result.Error != nil {
 		logger.Warn().Err(result.Error).Msg("fetch failed")
 		metrics.CrawlErrorsTotal.WithLabelValues(crawlingID, "fetch_error").Inc()
-		metrics.URLsCrawledTotal.WithLabelValues(crawlingID, "failed").Inc()
 
-		// Retry the task
-		if err := p.queue.Retry(ctx, crawlingID, task); err != nil {
-			logger.Error().Err(err).Msg("failed to retry task")
-		}
-
-		// Update progress
-		_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 0, 1)
+		p.recordAttemptFailure(ctx, logger, crawlingID, task, result.Error.Error(), 0)
 		return
 	}
 
@@ -307,12 +307,9 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 	// Check for server errors (retry-worthy)
 	if result.StatusCode >= 500 {
 		metrics.CrawlErrorsTotal.WithLabelValues(crawlingID, "server_error").Inc()
-		metrics.URLsCrawledTotal.WithLabelValues(crawlingID, "failed").Inc()
 
-		if err := p.queue.Retry(ctx, crawlingID, task); err != nil {
-			logger.Error().Err(err).Msg("failed to retry task")
-		}
-		_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 0, 1)
+		p.recordAttemptFailure(ctx, logger, crawlingID, task,
+			fmt.Sprintf("server returned HTTP %d", result.StatusCode), result.StatusCode)
 		return
 	}
 
@@ -326,6 +323,52 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 		ContentType:  result.ContentType,
 		ResponseTime: result.ResponseTime.Milliseconds(),
 		CrawledAt:    time.Now(),
+		RedirectedTo: result.RedirectedTo,
+	}
+
+	// Assets the page references — images, stylesheets, scripts, fonts. A
+	// sitemap lists pages and at best original-size images, but a visitor
+	// fetches the responsive variant, so warming only what the sitemap names
+	// leaves most of what people actually wait for cold.
+	if result.Signals != nil && len(result.Signals.Assets) > 0 {
+		p.queueAssets(ctx, crawlingID, task, result.Signals.Assets)
+	}
+
+	// Outbound links are recorded separately from the crawl result: link
+	// checking is its own pipeline with its own budget, and a page's link graph
+	// would dwarf the result document if stored inline.
+	if result.Signals != nil && len(result.Signals.Links) > 0 {
+		if external := crawler.ExternalLinks(task.URL, result.Signals.Links); len(external) > 0 {
+			links := make([]models.OutboundLink, 0, len(external))
+			for _, l := range external {
+				links = append(links, models.OutboundLink{
+					URL:     l.URL,
+					FoundOn: []string{l.FoundOn},
+				})
+			}
+
+			// Never fatal to the crawl: link collection is a side benefit, and
+			// the cache report is what the customer is paying for.
+			if err := p.repo.RecordOutboundLinks(ctx, mustObjectID(task.SiteID), links); err != nil {
+				log.Warn().Err(err).Str("url", task.URL).Msg("failed to record outbound links")
+			}
+		}
+	}
+
+	if result.Signals != nil {
+		crawlingResult.Page = &models.PageSignals{
+			Title:            result.Signals.Title,
+			TitleLength:      result.Signals.TitleLength,
+			MetaDescription:  result.Signals.MetaDescription,
+			MetaDescLength:   result.Signals.MetaDescLength,
+			Canonical:        result.Signals.Canonical,
+			NoIndex:          result.Signals.NoIndex,
+			H1Count:          result.Signals.H1Count,
+			WordCount:        result.Signals.WordCount,
+			ImagesMissingAlt: result.Signals.ImagesMissingAlt,
+			InsecureRefs:     result.Signals.InsecureRefs,
+			SoftNotFound:     result.Signals.SoftNotFound,
+		}
 	}
 
 	if err := p.repo.InsertCrawlingResult(ctx, &crawlingResult); err != nil {
@@ -342,6 +385,47 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 
 	// Update progress
 	_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 1, 0)
+}
+
+// recordAttemptFailure handles one failed fetch attempt: it reschedules the
+// task and, only once the retry chain is exhausted, counts the URL as failed
+// and persists a CrawlFailure row.
+//
+// Counting on every attempt (the previous behaviour) inflated failed_urls by
+// up to MaxRetries+1 per dead URL, pushing crawled+failed past total_urls and
+// progress past 100%.
+func (p *Pool) recordAttemptFailure(
+	ctx context.Context,
+	logger zerolog.Logger,
+	crawlingID string,
+	task *models.CrawlTask,
+	errMsg string,
+	statusCode int,
+) {
+	dead, err := p.queue.Retry(ctx, crawlingID, task)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retry task")
+	}
+	if !dead {
+		// Still has attempts left — not a failure yet.
+		return
+	}
+
+	metrics.URLsCrawledTotal.WithLabelValues(crawlingID, "failed").Inc()
+	_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 0, 1)
+
+	// Persist the failure so GET /crawlings/:id/failures can report it.
+	if err := p.repo.InsertCrawlFailure(ctx, &models.CrawlFailure{
+		CrawlingID: mustObjectID(crawlingID),
+		SiteID:     mustObjectID(task.SiteID),
+		URL:        task.URL,
+		Error:      errMsg,
+		StatusCode: statusCode,
+		Retries:    task.Retries,
+		FailedAt:   time.Now(),
+	}); err != nil {
+		logger.Error().Err(err).Msg("failed to store crawl failure")
+	}
 }
 
 // checkJobCompletion checks if a crawling job has finished all its work.
@@ -438,4 +522,128 @@ func mustObjectID(hex string) primitive.ObjectID {
 		return primitive.NilObjectID
 	}
 	return id
+}
+
+// queueAssets adds a page's asset references to the running crawl.
+//
+// Same-host only: a CDN or a third party's images are not the customer's cache
+// to warm, and fetching them would spend the crawl's budget on someone else's
+// infrastructure. Deduplicated against the same set the sitemap URLs used, so
+// a logo referenced from every page is fetched once.
+func (p *Pool) queueAssets(ctx context.Context, crawlingID string, task *models.CrawlTask, refs []string) {
+	page, err := url.Parse(task.URL)
+	if err != nil || page.Host == "" {
+		return
+	}
+
+	// The site's url_limit is a promise about how many requests a crawl makes
+	// against the customer's origin. Assets are requests, so discovery stops
+	// once the crawl has as many URLs as the limit allows.
+	var (
+		limit int
+		mode  = models.AssetModeTopVariants
+	)
+	if oid, err := primitive.ObjectIDFromHex(task.SiteID); err == nil {
+		if site, err := p.repo.GetSite(ctx, oid); err == nil && site != nil {
+			limit = site.URLLimit
+			mode = models.NormalizeAssetMode(site.AssetMode)
+		}
+	}
+
+	// Narrow to what this site actually wants warmed before spending any of
+	// the budget on it.
+	refs = crawler.FilterAssets(refs, mode)
+	if len(refs) == 0 {
+		return
+	}
+
+	// Counted once and tracked locally: a Count per asset would be hundreds of
+	// Redis round trips per page. Slight overshoot when several pages queue
+	// assets at the same moment is acceptable — the limit guards the customer's
+	// origin from a runaway crawl, not an exact quota.
+	var remaining int
+	if limit > 0 {
+		seen, err := p.dedup.Count(ctx, crawlingID)
+		if err != nil {
+			return
+		}
+		if seen >= int64(limit) {
+			return
+		}
+		remaining = limit - int(seen)
+	}
+
+	var tasks []models.CrawlTask
+
+	for _, raw := range refs {
+		if limit > 0 && len(tasks) >= remaining {
+			break
+		}
+
+		ref, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+
+		target := page.ResolveReference(ref)
+		if target.Scheme != "http" && target.Scheme != "https" {
+			continue
+		}
+		if !strings.EqualFold(target.Host, page.Host) {
+			continue
+		}
+
+		// The fragment is a position within a file, not a separate one.
+		target.Fragment = ""
+		assetURL := target.String()
+
+		urlHash := dedup.HashURL(assetURL)
+		isNew, err := p.dedup.MarkSeen(ctx, crawlingID, urlHash)
+		if err != nil || !isNew {
+			continue
+		}
+
+		tasks = append(tasks, models.CrawlTask{
+			CrawlingID:  crawlingID,
+			SiteID:      task.SiteID,
+			URL:         assetURL,
+			URLHash:     urlHash,
+			UserAgent:   task.UserAgent,
+			ExtractData: task.ExtractData,
+			MaxRetries:  p.cfg.CrawlerMaxRetries,
+			EnqueuedAt:  time.Now().Unix(),
+		})
+	}
+
+	if len(tasks) == 0 {
+		return
+	}
+
+	if err := p.queue.EnqueueBatch(ctx, crawlingID, tasks); err != nil {
+		log.Warn().Err(err).Int("assets", len(tasks)).Msg("failed to queue page assets")
+		return
+	}
+
+	// Remember them, so the next crawl does not have to re-parse every page to
+	// find the same assets again.
+	if siteOID, err := primitive.ObjectIDFromHex(task.SiteID); err == nil {
+		stored := make([]models.SiteURL, 0, len(tasks))
+		for _, t := range tasks {
+			stored = append(stored, models.SiteURL{
+				URL:     t.URL,
+				URLHash: t.URLHash,
+				Kind:    models.SiteURLKindAsset,
+			})
+		}
+
+		if err := p.repo.RecordSiteURLs(ctx, siteOID, stored); err != nil {
+			log.Warn().Err(err).Msg("failed to store discovered assets")
+		}
+	}
+
+	// The progress bar counts what will actually be fetched, so the total has
+	// to grow as assets are discovered rather than only counting sitemap URLs.
+	if oid, err := primitive.ObjectIDFromHex(crawlingID); err == nil {
+		_ = p.repo.IncCrawlingTotalURLs(ctx, oid, len(tasks))
+	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
 	"github.com/webkonsulenterne/crawler-backend/internal/discovery"
+	"github.com/webkonsulenterne/crawler-backend/internal/linkcheck"
 	"github.com/webkonsulenterne/crawler-backend/internal/metrics"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
 	"github.com/webkonsulenterne/crawler-backend/internal/queue"
@@ -67,13 +68,38 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		return
 	}
 
-	// url_source is required for csv/xml; for auto it is unused.
-	if req.URLSourceType != models.URLSourceTypeAuto && strings.TrimSpace(req.URLSource) == "" {
+	// url_source is required for csv/xml. Auto walks from base_url, and smart
+	// finds the sitemap itself, so neither needs one.
+	if req.URLSourceType != models.URLSourceTypeAuto &&
+		req.URLSourceType != models.URLSourceTypeSmart &&
+		strings.TrimSpace(req.URLSource) == "" {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error: "url_source is required when url_source_type is 'csv' or 'xml'",
 			Code:  "INVALID_REQUEST",
 		})
 		return
+	}
+
+	// Customers type a bare domain, so fill the scheme in before anything
+	// downstream — validation, storage, crawling — sees the value.
+	normalisedBase, err := source.NormalizeSiteURL(req.BaseURL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error(), Code: "INVALID_REQUEST"})
+		return
+	}
+	req.BaseURL = normalisedBase
+
+	// Reject infrastructure targets before anything is persisted: both of
+	// these are fetched server-side, so an unvalidated value is an SSRF.
+	if err := source.ValidateTargetURL(req.BaseURL, h.cfg.AllowPrivateTargets); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "base_url rejected: " + err.Error(), Code: "INVALID_TARGET"})
+		return
+	}
+	if strings.TrimSpace(req.URLSource) != "" {
+		if err := source.ValidateTargetURL(req.URLSource, h.cfg.AllowPrivateTargets); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "url_source rejected: " + err.Error(), Code: "INVALID_TARGET"})
+			return
+		}
 	}
 
 	// Parse extract_data from comma-separated string
@@ -100,6 +126,8 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		URLSourceType: req.URLSourceType,
 		UserAgent:     userAgent,
 		ExtractData:   extractData,
+		SmartRecrawl:  req.SmartRecrawl,
+		AssetMode:     models.NormalizeAssetMode(req.AssetMode),
 	}
 
 	if err := h.repo.CreateSite(c.Request.Context(), site); err != nil {
@@ -169,12 +197,23 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 		update["name"] = *req.Name
 	}
 	if req.BaseURL != nil {
+		if normalised, nerr := source.NormalizeSiteURL(*req.BaseURL); nerr == nil {
+			req.BaseURL = &normalised
+		}
+		if err := source.ValidateTargetURL(*req.BaseURL, h.cfg.AllowPrivateTargets); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "base_url rejected: " + err.Error(), Code: "INVALID_TARGET"})
+			return
+		}
 		update["base_url"] = *req.BaseURL
 	}
 	if req.URLLimit != nil {
 		update["url_limit"] = *req.URLLimit
 	}
 	if req.URLSource != nil {
+		if err := source.ValidateTargetURL(*req.URLSource, h.cfg.AllowPrivateTargets); err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "url_source rejected: " + err.Error(), Code: "INVALID_TARGET"})
+			return
+		}
 		update["url_source"] = *req.URLSource
 	}
 	if req.URLSourceType != nil {
@@ -194,6 +233,12 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 			}
 		}
 		update["extract_data"] = extractData
+	}
+	if req.SmartRecrawl != nil {
+		update["smart_recrawl"] = *req.SmartRecrawl
+	}
+	if req.AssetMode != nil {
+		update["asset_mode"] = models.NormalizeAssetMode(*req.AssetMode)
 	}
 
 	if len(update) == 0 {
@@ -256,6 +301,25 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 	site, err := h.repo.GetSite(c.Request.Context(), siteID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	// Refuse a second concurrent crawl of the same site.
+	//
+	// Two rounds running together double the request rate against the
+	// customer's origin, which can take their site down. Enforced here rather
+	// than only in the dashboard so any caller is covered, and returns the
+	// existing crawl so the UI can link to it instead of just refusing.
+	if active, err := h.repo.ActiveCrawlingForSite(c.Request.Context(), siteID); err != nil {
+		log.Error().Err(err).Msg("failed to check for an active crawling")
+	} else if active != nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":       "this site is already being crawled",
+			"code":        "ALREADY_RUNNING",
+			"crawling_id": active.ID.Hex(),
+			"status":      active.Status,
+			"started_at":  active.StartedAt,
+		})
 		return
 	}
 
@@ -333,15 +397,44 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		return
 	}
 
+	// A stored URL list, if one is current, is the whole point of keeping it:
+	// deriving the list means fetching the source and parsing every page,
+	// which on a real customer site is 341 pages to find 13,209 assets. Doing
+	// that every round is most of a crawl's cost spent rediscovering what did
+	// not change.
+	if !crawling.ReloadSource && h.useStoredURLList(ctx, logger, crawlingID, oid, site, crawling) {
+		return
+	}
+
+	// Smart: find the sitemap rather than making the customer supply it. The
+	// pages it lists are crawled like any XML source; the assets those pages
+	// load are harvested as the crawl runs.
+	source := site.URLSource
+	sourceType := site.URLSourceType
+
+	if sourceType == models.URLSourceTypeSmart {
+		found, err := h.resolveSmartSource(ctx, site)
+		if err != nil {
+			logger.Error().Err(err).Str("base_url", site.BaseURL).Msg("smart source could not find a sitemap")
+			_ = h.repo.SetCrawlingError(ctx, oid, "could not find a sitemap for "+site.BaseURL+
+				" — set the sitemap URL manually, or upload a CSV")
+			return
+		}
+
+		logger.Info().Str("sitemap", found).Msg("smart source resolved a sitemap")
+		source = found
+		sourceType = models.URLSourceTypeXML
+	}
+
 	// --- Static-source (CSV / XML) path ---
 
 	logger.Info().
-		Str("source", site.URLSource).
-		Str("source_type", site.URLSourceType).
+		Str("source", source).
+		Str("source_type", sourceType).
 		Int("url_limit", site.URLLimit).
 		Msg("fetching URL source")
 
-	urls, stats, err := h.parser.ParseURLs(ctx, site.URLSource, site.URLSourceType, site.UserAgent, site.URLLimit)
+	urls, stats, err := h.parser.ParseURLs(ctx, source, sourceType, site.UserAgent, site.URLLimit)
 	if err != nil {
 		logger.Error().Err(err).Interface("parse_stats", stats).Msg("failed to parse URL source")
 		msg := "failed to parse URL source: " + err.Error()
@@ -369,6 +462,23 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		Interface("parse_stats", stats).
 		Msg("URLs parsed from source")
 
+	// Smart recrawl: look up what the previous round found already cached.
+	// Those URLs are skipped below and their results copied forward, so the
+	// report still describes the whole site rather than only what was
+	// re-fetched.
+	cached := map[string]models.CrawlingResult{}
+	if site.SmartRecrawl {
+		found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid)
+		if err != nil {
+			// Not fatal: fall back to crawling everything, which is correct,
+			// just slower than the customer asked for.
+			logger.Error().Err(err).Msg("smart recrawl lookup failed; crawling all URLs")
+		} else {
+			cached = found
+			logger.Info().Int("cached_last_round", len(cached)).Msg("smart recrawl enabled")
+		}
+	}
+
 	// Provisional total — corrected at the end to reflect what actually
 	// passed the type filter and dedup.
 	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, len(urls))
@@ -381,6 +491,7 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 
 	batchSize := 1000
 	totalEnqueued := 0
+	var carryForward []models.CrawlingResult
 
 	for i := 0; i < len(urls); i += batchSize {
 		end := i + batchSize
@@ -400,6 +511,12 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 				continue
 			}
 			if !isNew {
+				continue
+			}
+			// Cached last round: copy that result forward instead of
+			// spending a request re-confirming it.
+			if prev, ok := cached[u]; ok {
+				carryForward = append(carryForward, prev)
 				continue
 			}
 			tasks = append(tasks, models.CrawlTask{
@@ -424,12 +541,52 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		}
 	}
 
-	logger.Info().Int("enqueued", totalEnqueued).Msg("URL ingestion complete")
+	if len(carryForward) > 0 {
+		if err := h.repo.CarryForwardResults(ctx, oid, carryForward); err != nil {
+			logger.Error().Err(err).Int("count", len(carryForward)).Msg("failed to carry results forward")
+		}
+	}
 
-	// Correct total to actual enqueued count (post-filter, post-dedup).
-	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, totalEnqueued)
+	// Save what the source yielded, so the next crawl can skip re-deriving it.
+	// Assets are added by the workers as they parse each page.
+	if len(urls) > 0 {
+		pageURLs := make([]models.SiteURL, 0, len(urls))
+		for _, u := range urls {
+			pageURLs = append(pageURLs, models.SiteURL{
+				URL:     u,
+				URLHash: dedup.HashURL(u),
+				Kind:    models.SiteURLKindPage,
+			})
+		}
+
+		if err := h.repo.RecordSiteURLs(ctx, site.ID, pageURLs); err != nil {
+			logger.Warn().Err(err).Msg("failed to store the source URL list")
+		} else if err := h.repo.MarkSiteURLsBuilt(ctx, site.ID); err != nil {
+			logger.Warn().Err(err).Msg("failed to mark the URL list as built")
+		}
+	}
+
+	logger.Info().
+		Int("enqueued", totalEnqueued).
+		Int("carried_forward", len(carryForward)).
+		Msg("URL ingestion complete")
+
+	// The total counts carried-forward URLs too: they are part of the report
+	// even though they cost no request, and excluding them would make the
+	// site look like it shrank.
+	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, totalEnqueued+len(carryForward))
 
 	if totalEnqueued == 0 {
+		// Everything was carried forward: nothing to fetch, so the round is
+		// already complete rather than an error.
+		if len(carryForward) > 0 {
+			_ = h.repo.SetCrawlingCrawledURLs(ctx, oid, len(carryForward))
+			_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
+			_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
+			logger.Info().Msg("every URL was still cached; nothing needed fetching")
+			return
+		}
+
 		// Type filter excluded everything (or source was all duplicates).
 		_ = h.repo.SetCrawlingError(ctx, oid, "no URLs passed the url_type filter; nothing to crawl")
 		return
@@ -874,18 +1031,8 @@ func (h *Handler) GetSiteAnalytics(c *gin.Context) {
 		return
 	}
 
-	// Window: last `days` days (default 7, clamped 1..90).
-	days := 7
-	if raw := c.Query("days"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			days = n
-		}
-	}
-	if days > 90 {
-		days = 90
-	}
-	to := time.Now().UTC()
-	from := to.AddDate(0, 0, -days)
+	// Same window semantics as /issues: rolling days, or an explicit range.
+	from, to, days := resolveWindow(c, 7, 90)
 
 	statusValues, statusTotal, err := h.repo.GetSiteStatusAnalytics(c.Request.Context(), siteID, from, to)
 	if err != nil {
@@ -915,6 +1062,101 @@ func (h *Handler) GetSiteAnalytics(c *gin.Context) {
 		"to":      to,
 		"status":  gin.H{"total": statusTotal, "values": statusValues},
 		"headers": headers,
+	})
+}
+
+// GET /sites/:id/issues?days=30&limit=100 — URLs currently failing for a site.
+//
+// This is the "site health" view: broken links, gone pages and server errors,
+// aggregated across every crawl in the window rather than a single round, so a
+// customer sees what is wrong with their site rather than what one crawl saw.
+func (h *Handler) GetSiteIssues(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	if _, err := h.repo.GetSite(c.Request.Context(), siteID); err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	// Window: either a rolling `days` count, or an explicit from/to range.
+	// An explicit range wins — a caller who names dates means them.
+	since, until, days := resolveWindow(c, 30, 365)
+
+	limit := int64(100)
+	if raw := c.Query("limit"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+
+	issues, err := h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get site issues")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site issues"})
+		return
+	}
+
+	// Counts by kind, so the UI can headline "3 broken links" without
+	// re-deriving it from the list.
+	byKind := map[string]int{}
+	for _, i := range issues {
+		byKind[i.Kind]++
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"site_id": siteID.Hex(),
+		"days":    days,
+		"since":   since,
+		"until":   until,
+		"total":   len(issues),
+		"by_kind": byKind,
+		"data":    issues,
+	})
+}
+
+// GET /sites/:id/timeline?days=30&limit=100 — how a site changed over time.
+//
+// One point per crawl, several measures each, so the caller can plot them
+// together: coverage, staleness, speed and errors move independently, and
+// seeing them on one axis is what separates a CDN problem from an origin one.
+func (h *Handler) GetSiteTimeline(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	if _, err := h.repo.GetSite(c.Request.Context(), siteID); err != nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	since, _, days := resolveWindow(c, 30, 365)
+
+	limit := int64(100)
+	if raw := c.Query("limit"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	points, err := h.repo.GetSiteTimeline(c.Request.Context(), siteID, since, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to build site timeline")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to build site timeline"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"site_id": siteID.Hex(),
+		"days":    days,
+		"since":   since,
+		"total":   len(points),
+		"data":    points,
 	})
 }
 
@@ -1167,4 +1409,506 @@ func parsePagination(c *gin.Context) (int64, int64) {
 		skip = 0
 	}
 	return skip, limit
+}
+
+// resolveWindow reads a time window from the query string.
+//
+// Two forms are accepted, because they answer different questions:
+//   - days=7                     "how have things been lately"
+//   - from=2026-08-01&to=...     "what did it look like on this date"
+//
+// An explicit from/to wins over days: a caller who names dates means them.
+// `to` is inclusive of the whole day, so from=to=today returns today.
+// Returns the resolved bounds plus the equivalent day count for display.
+func resolveWindow(c *gin.Context, defaultDays, maxDays int) (since, until time.Time, days int) {
+	now := time.Now().UTC()
+	until = now
+
+	fromRaw := strings.TrimSpace(c.Query("from"))
+	toRaw := strings.TrimSpace(c.Query("to"))
+
+	if fromRaw != "" {
+		if t, err := parseDay(fromRaw); err == nil {
+			since = t
+
+			// A `from` with no usable `to` means "that day onwards, up to
+			// today". Anchoring the end to the start of tomorrow rather than
+			// leaving it at time.Now() keeps the window a whole number of days
+			// and stops a saved link from silently widening every time it is
+			// opened.
+			until = parseDayOf(now).AddDate(0, 0, 1)
+
+			if toRaw != "" {
+				if u, err := parseDay(toRaw); err == nil {
+					// Inclusive end: advance to the start of the next day.
+					until = u.AddDate(0, 0, 1)
+				}
+			}
+			if until.Before(since) {
+				since, until = until, since
+			}
+
+			// until is already the start of the day *after* the range, so the
+			// difference is the day count — adding one more would report a
+			// single-day window as two days.
+			return since, until, int(until.Sub(since).Hours() / 24)
+		}
+	}
+
+	days = defaultDays
+	if raw := c.Query("days"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > maxDays {
+		days = maxDays
+	}
+
+	return now.AddDate(0, 0, -days), until, days
+}
+
+// parseDay accepts a plain calendar date (2026-08-29) or a full RFC3339
+// timestamp, so the UI can send either.
+func parseDay(raw string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Parse(time.RFC3339, raw)
+}
+
+// parseDayOf truncates a timestamp to the start of its UTC day, so a window
+// built from it covers whole days rather than a partial one ending at whatever
+// time the request happened to arrive.
+func parseDayOf(t time.Time) time.Time {
+	u := t.UTC()
+
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// --- Sitemap Discovery ---
+
+type discoverSitemapRequest struct {
+	BaseURL   string `json:"base_url" binding:"required"`
+	UserAgent string `json:"user_agent"`
+}
+
+// DiscoverSitemap finds a site's sitemap so the customer does not have to know
+// where it lives. It is a read-only probe: nothing is stored, and the caller
+// decides whether to use what comes back.
+//
+// The URL is normalised before validation because customers type bare domains
+// ("billigfilter.dk"), not full URLs.
+func (h *Handler) DiscoverSitemap(c *gin.Context) {
+	var req discoverSitemapRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	normalised, err := source.NormalizeSiteURL(req.BaseURL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// The same guard every other user-supplied target goes through: without it
+	// this endpoint would fetch arbitrary internal addresses on request.
+	if err := source.ValidateTargetURL(normalised, h.cfg.AllowPrivateTargets); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	userAgent := strings.TrimSpace(req.UserAgent)
+	if userAgent == "" {
+		userAgent = h.cfg.DefaultUserAgent
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	candidates, err := h.parser.FindSitemaps(ctx, normalised, userAgent, h.cfg.AllowPrivateTargets)
+	if err != nil {
+		log.Error().Err(err).Str("base_url", normalised).Msg("sitemap discovery failed")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "could not reach the site"})
+		return
+	}
+
+	// Report the winner separately so the caller does not have to re-derive it
+	// from the candidate list.
+	var best *source.SitemapCandidate
+	for i := range candidates {
+		if candidates[i].Found && candidates[i].URLCount > 0 {
+			best = &candidates[i]
+			break
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"base_url":   normalised,
+		"found":      best != nil,
+		"sitemap":    best,
+		"candidates": candidates,
+	})
+}
+
+// --- Live Feed ---
+
+// TailCrawledURLs streams what a running crawl has just checked.
+//
+// Kept deliberately small: the caller polls with the last id it saw and gets
+// only what has landed since, so a long-running crawl does not re-send its
+// whole history on every poll.
+func (h *Handler) TailCrawledURLs(c *gin.Context) {
+	oid, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid crawling ID", Code: "INVALID_ID"})
+		return
+	}
+
+	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	var after primitive.ObjectID
+	if raw := c.Query("after"); raw != "" {
+		parsed, err := primitive.ObjectIDFromHex(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid after cursor", Code: "INVALID_CURSOR"})
+			return
+		}
+		after = parsed
+	}
+
+	results, err := h.repo.TailCrawlingResults(c.Request.Context(), oid, after, limit)
+	if err != nil {
+		log.Error().Err(err).Str("crawling_id", c.Param("id")).Msg("failed to tail crawl results")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read results", Code: "INTERNAL"})
+		return
+	}
+
+	// The caller polls with this rather than tracking ids itself.
+	cursor := c.Query("after")
+	if len(results) > 0 {
+		cursor = results[len(results)-1].ID.Hex()
+	}
+
+	crawling, err := h.repo.GetCrawling(c.Request.Context(), oid)
+	status := ""
+	if err == nil && crawling != nil {
+		status = string(crawling.Status)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":   results,
+		"cursor": cursor,
+		"status": status,
+	})
+}
+
+// --- External Link Checking ---
+
+// CheckSiteLinks verifies a batch of the site's outbound links.
+//
+// Deliberately batched and separate from crawling: these requests go to third
+// parties, so they run on their own budget and are spread over repeated calls
+// rather than hitting every destination at once. Callers poll until `remaining`
+// reaches zero.
+func (h *Handler) CheckSiteLinks(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	site, err := h.repo.GetSite(c.Request.Context(), siteID)
+	if err != nil || site == nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	// A destination checked recently is not worth re-checking: the answer will
+	// not have changed, and it is someone else's server.
+	maxAge, _ := strconv.Atoi(c.DefaultQuery("max_age_hours", "24"))
+	if maxAge <= 0 {
+		maxAge = 24
+	}
+	cutoff := time.Now().Add(-time.Duration(maxAge) * time.Hour)
+
+	pending, err := h.repo.OutboundLinksToCheck(c.Request.Context(), siteID, cutoff, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list links to check")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read links", Code: "INTERNAL"})
+		return
+	}
+
+	if len(pending) == 0 {
+		c.JSON(http.StatusOK, gin.H{"checked": 0, "broken": 0, "remaining": 0})
+		return
+	}
+
+	urls := make([]string, len(pending))
+	for i, l := range pending {
+		urls[i] = l.URL
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+	defer cancel()
+
+	checker := linkcheck.New(site.UserAgent, 15*time.Second)
+	results := checker.CheckAll(ctx, urls, h.cfg.LinkCheckConcurrency)
+
+	broken := 0
+	for i, res := range results {
+		if err := h.repo.SaveLinkCheck(ctx, pending[i].ID, res.StatusCode, res.Error, res.ResponseTime.Milliseconds()); err != nil {
+			log.Warn().Err(err).Str("url", res.URL).Msg("failed to save link check")
+		}
+		// Counted the same way models.OutboundLink.Broken() decides, so the
+		// number here matches what /links/broken later lists.
+		if res.Error != "" || (res.StatusCode >= 400 && !linkcheck.BotBlocked(res.StatusCode)) {
+			broken++
+		}
+	}
+
+	// What is still unchecked after this batch, so the caller knows to continue.
+	stillPending, err := h.repo.OutboundLinksToCheck(c.Request.Context(), siteID, cutoff, 1000)
+	remaining := 0
+	if err == nil {
+		remaining = len(stillPending)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"checked":   len(results),
+		"broken":    broken,
+		"remaining": remaining,
+	})
+}
+
+// GetBrokenLinks lists the site's outbound links whose last check failed.
+func (h *Handler) GetBrokenLinks(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "100"), 10, 64)
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	links, err := h.repo.BrokenOutboundLinks(c.Request.Context(), siteID, limit)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list broken links")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read links", Code: "INTERNAL"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": links, "count": len(links)})
+}
+
+// resolveSmartSource locates the sitemap a smart-source site should crawl.
+//
+// The result is not stored on the site: a customer who moves from Yoast to
+// RankMath gets the new location on the next crawl without anyone editing
+// anything, which is the point of the mode.
+func (h *Handler) resolveSmartSource(ctx context.Context, site *models.Site) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	candidates, err := h.parser.FindSitemaps(ctx, site.BaseURL, site.UserAgent, h.cfg.AllowPrivateTargets)
+	if err != nil {
+		return "", err
+	}
+
+	for _, c := range candidates {
+		if c.Found && c.URLCount > 0 {
+			return c.URL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no sitemap found at %s", site.BaseURL)
+}
+
+// useStoredURLList enqueues a site's saved URL list, if there is a current
+// one, and reports whether it did.
+//
+// Returning false means the caller should derive the list the slow way: fetch
+// the source, parse the pages, harvest the assets — and store the result as it
+// goes, so the next crawl can take this path instead.
+func (h *Handler) useStoredURLList(
+	ctx context.Context,
+	logger zerolog.Logger,
+	crawlingID string,
+	oid primitive.ObjectID,
+	site *models.Site,
+	crawling *models.Crawling,
+) bool {
+	// Never built, or aged out. A list that is too old stops reflecting the
+	// site: pages get added, images get replaced, and nobody would think to
+	// press refresh.
+	if site.URLsBuiltAt == nil || time.Since(*site.URLsBuiltAt) > models.SiteURLListAge {
+		return false
+	}
+
+	stored, err := h.repo.SiteURLList(ctx, site.ID, int64(site.URLLimit))
+	if err != nil {
+		logger.Error().Err(err).Msg("could not read the stored URL list; rebuilding")
+		return false
+	}
+	if len(stored) == 0 {
+		return false
+	}
+
+	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
+		logger.Error().Err(err).Msg("failed to init rate limiter")
+		_ = h.repo.SetCrawlingError(ctx, oid, "failed to init rate limiter")
+		return true
+	}
+
+	// Smart recrawl still applies: a stored list says what to crawl, not what
+	// is already warm.
+	cached := map[string]models.CrawlingResult{}
+	if site.SmartRecrawl {
+		if found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid); err == nil {
+			cached = found
+		}
+	}
+
+	var (
+		tasks        []models.CrawlTask
+		carryForward []models.CrawlingResult
+	)
+
+	for _, su := range stored {
+		if !allowsURL(crawling.URLType, su.URL) {
+			continue
+		}
+
+		isNew, err := h.dedup.MarkSeen(ctx, crawlingID, su.URLHash)
+		if err != nil || !isNew {
+			continue
+		}
+
+		if prev, ok := cached[su.URL]; ok {
+			carryForward = append(carryForward, prev)
+			continue
+		}
+
+		tasks = append(tasks, models.CrawlTask{
+			CrawlingID:  crawlingID,
+			SiteID:      site.ID.Hex(),
+			URL:         su.URL,
+			URLHash:     su.URLHash,
+			UserAgent:   site.UserAgent,
+			ExtractData: site.ExtractData,
+			MaxRetries:  h.cfg.CrawlerMaxRetries,
+			EnqueuedAt:  time.Now().Unix(),
+		})
+	}
+
+	if len(carryForward) > 0 {
+		if err := h.repo.CarryForwardResults(ctx, oid, carryForward); err != nil {
+			logger.Error().Err(err).Msg("failed to carry results forward")
+		}
+	}
+
+	if len(tasks) == 0 && len(carryForward) == 0 {
+		return false
+	}
+
+	for i := 0; i < len(tasks); i += 1000 {
+		end := min(i+1000, len(tasks))
+		if err := h.queue.EnqueueBatch(ctx, crawlingID, tasks[i:end]); err != nil {
+			logger.Error().Err(err).Msg("failed to enqueue batch from the stored list")
+		}
+	}
+
+	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, len(tasks)+len(carryForward))
+
+	logger.Info().
+		Int("from_stored_list", len(tasks)).
+		Int("carried_forward", len(carryForward)).
+		Time("list_built", *site.URLsBuiltAt).
+		Msg("crawling from the stored URL list")
+
+	if len(tasks) == 0 {
+		// Everything was still cached; nothing to fetch.
+		_ = h.repo.SetCrawlingCrawledURLs(ctx, oid, len(carryForward))
+		_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
+		_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
+		return true
+	}
+
+	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusRunning)
+	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusRunning)
+	_ = h.stateManager.AddActiveCrawling(ctx, crawlingID)
+
+	metrics.ActiveCrawlingsGauge.Inc()
+
+	return true
+}
+
+// GetSiteURLList reports what is in a site's stored URL list.
+func (h *Handler) GetSiteURLList(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	site, err := h.repo.GetSite(c.Request.Context(), siteID)
+	if err != nil || site == nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	pages, assets, err := h.repo.CountSiteURLs(c.Request.Context(), siteID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to count stored URLs")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read the list", Code: "INTERNAL"})
+		return
+	}
+
+	stale := site.URLsBuiltAt == nil || time.Since(*site.URLsBuiltAt) > models.SiteURLListAge
+
+	c.JSON(http.StatusOK, gin.H{
+		"pages":    pages,
+		"assets":   assets,
+		"total":    pages + assets,
+		"built_at": site.URLsBuiltAt,
+		// stale means the next crawl rebuilds the list rather than reusing it.
+		"stale": stale,
+	})
+}
+
+// RefreshSiteURLList discards a site's stored list so the next crawl rebuilds
+// it from the source.
+//
+// The rows are removed rather than left to be overwritten: a URL that no
+// longer exists on the site would otherwise linger indefinitely, since nothing
+// would refresh its last_seen_at.
+func (h *Handler) RefreshSiteURLList(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	if err := h.repo.ClearSiteURLs(c.Request.Context(), siteID); err != nil {
+		log.Error().Err(err).Msg("failed to clear the stored URL list")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to clear the list", Code: "INTERNAL"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"cleared": true,
+		"message": "The URL list will be rebuilt on the next crawl.",
+	})
 }

@@ -76,18 +76,39 @@ func main() {
 	router := gin.New()
 	router.Use(middleware.Recovery())
 	router.Use(middleware.RequestLogger())
-	router.Use(middleware.CORS())
+	router.Use(middleware.CORS(cfg.AllowedOrigins))
+
+	// Fail loudly rather than silently running an open API in production.
+	if cfg.APIKey == "" {
+		log.Warn().Msg("API_KEY is not set — the API is UNAUTHENTICATED. Set API_KEY before exposing this service.")
+	}
+	if cfg.AllowPrivateTargets {
+		log.Warn().Msg("ALLOW_PRIVATE_TARGETS=true — SSRF protection is DISABLED. Local development only.")
+	}
 
 	// --- Routes ---
 	router.GET("/health", handler.Health)
+
+	// Everything below requires the shared secret.
+	router.Use(middleware.APIKeyAuth(cfg.APIKey))
 
 	// Sites
 	router.POST("/sites", handler.CreateSite)
 	router.GET("/sites", handler.ListSites)
 	router.GET("/sites/:id", handler.GetSite)
 	router.GET("/sites/:id/analytics", handler.GetSiteAnalytics)
+	router.GET("/sites/:id/issues", handler.GetSiteIssues)
+	router.GET("/sites/:id/timeline", handler.GetSiteTimeline)
+	router.GET("/sites/:id/urls", handler.GetSiteURLList)
+	router.POST("/sites/:id/urls/refresh", handler.RefreshSiteURLList)
+	router.POST("/sites/:id/links/check", handler.CheckSiteLinks)
+	router.GET("/sites/:id/links/broken", handler.GetBrokenLinks)
 	router.PUT("/sites/:id", handler.UpdateSite)
 	router.DELETE("/sites/:id", handler.DeleteSite)
+
+	// Read-only probe used by the dashboard's create-site form. Stores
+	// nothing; the caller decides whether to use what comes back.
+	router.POST("/sitemap/discover", handler.DiscoverSitemap)
 
 	// Crawlings
 	router.POST("/crawlings/start", handler.StartCrawling)
@@ -103,6 +124,7 @@ func main() {
 	router.GET("/crawlings/:id/results/analytics", handler.GetHeaderAnalytics)
 	router.GET("/crawlings/:id/status-analytics", handler.GetCrawlingStatusAnalytics)
 	router.GET("/crawlings/:id/urls", handler.ListCrawledURLs)
+	router.GET("/crawlings/:id/urls/tail", handler.TailCrawledURLs)
 	router.GET("/crawlings/:id/urls/export", handler.ExportCrawledURLs)
 
 	// --- Metrics Server ---

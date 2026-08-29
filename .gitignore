@@ -23,3 +23,7 @@ mongo-data/
 # Go
 /vendor/
 /tmp/
+
+# Local test fixtures (Screaming Frog exports, large CSVs) — served over HTTP
+# to the crawler during local development, not part of the build.
+/sample-data/

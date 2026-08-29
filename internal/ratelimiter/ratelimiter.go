@@ -25,9 +25,9 @@ func NewDistributedRateLimiter(rdb *redis.Client) *DistributedRateLimiter {
 	return &DistributedRateLimiter{rdb: rdb}
 }
 
-func tokensKey(crawlingID string) string     { return fmt.Sprintf("crawl:%s:tokens", crawlingID) }
-func refillKey(crawlingID string) string     { return fmt.Sprintf("crawl:%s:tokens:refill", crawlingID) }
-func speedKey(crawlingID string) string      { return fmt.Sprintf("crawl:%s:speed", crawlingID) }
+func tokensKey(crawlingID string) string { return fmt.Sprintf("crawl:%s:tokens", crawlingID) }
+func refillKey(crawlingID string) string { return fmt.Sprintf("crawl:%s:tokens:refill", crawlingID) }
+func speedKey(crawlingID string) string  { return fmt.Sprintf("crawl:%s:speed", crawlingID) }
 
 // Init sets up the token bucket for a crawling job.
 func (rl *DistributedRateLimiter) Init(ctx context.Context, crawlingID string, speedPerHour int) error {

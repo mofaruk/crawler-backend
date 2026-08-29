@@ -41,10 +41,10 @@ const maxSitemapDepth = 5
 // to surface it. When the URL list comes back empty, Diagnosis() turns these
 // counters into a human-readable reason suitable for an end-user error log.
 type ParseStats struct {
-	SourceURL     string `json:"source_url"`
-	SourceType    string `json:"source_type"`
-	HTTPStatus    int    `json:"http_status,omitempty"`
-	ContentBytes  int64  `json:"content_bytes"` // bytes read from the root document
+	SourceURL    string `json:"source_url"`
+	SourceType   string `json:"source_type"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	ContentBytes int64  `json:"content_bytes"` // bytes read from the root document
 
 	// CSV-specific counters.
 	CSVRowsScanned int `json:"csv_rows_scanned,omitempty"`
@@ -53,14 +53,18 @@ type ParseStats struct {
 	CSVEmptyRows   int `json:"csv_empty_rows,omitempty"`
 
 	// XML-specific counters.
-	XMLFormat          string `json:"xml_format,omitempty"`        // "urlset", "sitemapindex", "mixed", "unknown"
+	XMLFormat          string `json:"xml_format,omitempty"`         // "urlset", "sitemapindex", "mixed", "unknown"
 	XMLDocumentsRead   int    `json:"xml_documents_read,omitempty"` // root + child sitemaps successfully fetched
 	XMLDocumentsFailed int    `json:"xml_documents_failed,omitempty"`
 	XMLChildSitemaps   int    `json:"xml_child_sitemaps,omitempty"` // <sitemap><loc> entries observed
 	XMLDepthReached    int    `json:"xml_depth_reached,omitempty"`
 	XMLGzipDecoded     bool   `json:"xml_gzip_decoded,omitempty"`
 	XMLLocEntries      int    `json:"xml_loc_entries,omitempty"` // total <url><loc> observed across all docs
-	XMLParseError      string `json:"xml_parse_error,omitempty"` // first non-EOF decoder error on the root document
+	// XMLImageEntries counts <image:image><image:loc> URLs taken from the
+	// sitemap. Reported separately so it is visible how much of a crawl is
+	// images rather than pages.
+	XMLImageEntries int    `json:"xml_image_entries,omitempty"`
+	XMLParseError   string `json:"xml_parse_error,omitempty"` // first non-EOF decoder error on the root document
 
 	// Common — apply to both CSV first-column URLs and XML <loc>s.
 	URLsAccepted        int `json:"urls_accepted"`
@@ -268,6 +272,20 @@ func (p *URLParser) parseCSV(reader io.Reader, limit int, stats *ParseStats) ([]
 // sitemapLoc captures the <loc> of both <url> (urlset) and <sitemap>
 // (sitemapindex) entries — both wrap a single <loc>.
 type sitemapLoc struct {
+	// XMLName pins this to the element being decoded so that Loc matches only
+	// the direct child <loc>. Go's decoder ignores namespaces, so an unscoped
+	// `xml:"loc"` would also match the <image:loc> nested inside <image:image>.
+	Loc string `xml:"loc"`
+
+	// Images are the <image:image><image:loc> entries WordPress SEO plugins
+	// attach to a page. Yoast and RankMath both publish these, so most
+	// WordPress sites already list their images and were simply being
+	// skipped: on one real customer sitemap this is 954 image URLs that the
+	// crawl never warmed.
+	Images []sitemapImage `xml:"image"`
+}
+
+type sitemapImage struct {
 	Loc string `xml:"loc"`
 }
 
@@ -375,6 +393,25 @@ func (p *URLParser) parseSitemap(ctx context.Context, target, userAgent string, 
 				default:
 					stats.URLsRejectedInvalid++
 				}
+
+				// Images the page declares. A sitemap lists pages, but on an
+				// image-heavy site most of what a visitor waits for is the
+				// images — and Yoast and RankMath already publish them here,
+				// so they were being fetched and thrown away.
+				for _, img := range u.Images {
+					if limit > 0 && len(urls) >= limit {
+						break
+					}
+
+					imgLoc := strings.TrimSpace(img.Loc)
+					if imgLoc == "" || !isValidURL(imgLoc) {
+						continue
+					}
+
+					urls = append(urls, imgLoc)
+					stats.XMLImageEntries++
+					stats.URLsAccepted++
+				}
 			}
 		case "sitemap": // <sitemapindex> entry → a child sitemap
 			stats.XMLChildSitemaps++
@@ -423,6 +460,73 @@ func (p *URLParser) parseSitemap(ctx context.Context, target, userAgent string, 
 	if limit > 0 && len(urls) > limit {
 		urls = urls[:limit]
 	}
+	return urls, nil
+}
+
+// parseSitemapReader parses one already-fetched sitemap document without
+// following child sitemaps. Used by sitemap discovery, which needs to know a
+// document is real and has entries — not to walk the whole tree.
+func (p *URLParser) parseSitemapReader(r io.Reader, limit int, stats *ParseStats) ([]string, error) {
+	var urls []string
+	docFormat := ""
+
+	decoder := xml.NewDecoder(bufio.NewReaderSize(r, 64*1024))
+	decoder.CharsetReader = charset.NewReaderLabel
+
+	for {
+		if limit > 0 && len(urls) >= limit {
+			break
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		se, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch se.Name.Local {
+		case "urlset":
+			if docFormat == "" {
+				docFormat = "urlset"
+			}
+		case "sitemapindex":
+			if docFormat == "" {
+				docFormat = "sitemapindex"
+			}
+		case "url":
+			var u sitemapLoc
+			if decoder.DecodeElement(&u, &se) != nil {
+				continue
+			}
+
+			if isValidURL(strings.TrimSpace(u.Loc)) {
+				urls = append(urls, strings.TrimSpace(u.Loc))
+			}
+
+			// Images the page declares. Warming these is the point: a sitemap
+			// lists pages, but most of what a visitor waits for on an
+			// image-heavy site is the images, and they would otherwise never
+			// be requested.
+			for _, img := range u.Images {
+				loc := strings.TrimSpace(img.Loc)
+				if loc == "" || !isValidURL(loc) {
+					continue
+				}
+
+				urls = append(urls, loc)
+				stats.XMLImageEntries++
+			}
+		case "sitemap":
+			stats.XMLChildSitemaps++
+			var sm sitemapLoc
+			if decoder.DecodeElement(&sm, &se) == nil && isValidURL(strings.TrimSpace(sm.Loc)) {
+				urls = append(urls, strings.TrimSpace(sm.Loc))
+			}
+		}
+	}
+
+	stats.XMLFormat = docFormat
 	return urls, nil
 }
 
