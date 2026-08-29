@@ -625,6 +625,23 @@ func (p *Pool) queueAssets(ctx context.Context, crawlingID string, task *models.
 		return
 	}
 
+	// Remember them, so the next crawl does not have to re-parse every page to
+	// find the same assets again.
+	if siteOID, err := primitive.ObjectIDFromHex(task.SiteID); err == nil {
+		stored := make([]models.SiteURL, 0, len(tasks))
+		for _, t := range tasks {
+			stored = append(stored, models.SiteURL{
+				URL:     t.URL,
+				URLHash: t.URLHash,
+				Kind:    models.SiteURLKindAsset,
+			})
+		}
+
+		if err := p.repo.RecordSiteURLs(ctx, siteOID, stored); err != nil {
+			log.Warn().Err(err).Msg("failed to store discovered assets")
+		}
+	}
+
 	// The progress bar counts what will actually be fetched, so the total has
 	// to grow as assets are discovered rather than only counting sitemap URLs.
 	if oid, err := primitive.ObjectIDFromHex(crawlingID); err == nil {

@@ -385,6 +385,15 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		return
 	}
 
+	// A stored URL list, if one is current, is the whole point of keeping it:
+	// deriving the list means fetching the source and parsing every page,
+	// which on a real customer site is 341 pages to find 13,209 assets. Doing
+	// that every round is most of a crawl's cost spent rediscovering what did
+	// not change.
+	if !crawling.ReloadSource && h.useStoredURLList(ctx, logger, crawlingID, oid, site, crawling) {
+		return
+	}
+
 	// Smart: find the sitemap rather than making the customer supply it. The
 	// pages it lists are crawled like any XML source; the assets those pages
 	// load are harvested as the crawl runs.
@@ -523,6 +532,25 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 	if len(carryForward) > 0 {
 		if err := h.repo.CarryForwardResults(ctx, oid, carryForward); err != nil {
 			logger.Error().Err(err).Int("count", len(carryForward)).Msg("failed to carry results forward")
+		}
+	}
+
+	// Save what the source yielded, so the next crawl can skip re-deriving it.
+	// Assets are added by the workers as they parse each page.
+	if len(urls) > 0 {
+		pageURLs := make([]models.SiteURL, 0, len(urls))
+		for _, u := range urls {
+			pageURLs = append(pageURLs, models.SiteURL{
+				URL:     u,
+				URLHash: dedup.HashURL(u),
+				Kind:    models.SiteURLKindPage,
+			})
+		}
+
+		if err := h.repo.RecordSiteURLs(ctx, site.ID, pageURLs); err != nil {
+			logger.Warn().Err(err).Msg("failed to store the source URL list")
+		} else if err := h.repo.MarkSiteURLsBuilt(ctx, site.ID); err != nil {
+			logger.Warn().Err(err).Msg("failed to mark the URL list as built")
 		}
 	}
 
@@ -1695,4 +1723,181 @@ func (h *Handler) resolveSmartSource(ctx context.Context, site *models.Site) (st
 	}
 
 	return "", fmt.Errorf("no sitemap found at %s", site.BaseURL)
+}
+
+// useStoredURLList enqueues a site's saved URL list, if there is a current
+// one, and reports whether it did.
+//
+// Returning false means the caller should derive the list the slow way: fetch
+// the source, parse the pages, harvest the assets — and store the result as it
+// goes, so the next crawl can take this path instead.
+func (h *Handler) useStoredURLList(
+	ctx context.Context,
+	logger zerolog.Logger,
+	crawlingID string,
+	oid primitive.ObjectID,
+	site *models.Site,
+	crawling *models.Crawling,
+) bool {
+	// Never built, or aged out. A list that is too old stops reflecting the
+	// site: pages get added, images get replaced, and nobody would think to
+	// press refresh.
+	if site.URLsBuiltAt == nil || time.Since(*site.URLsBuiltAt) > models.SiteURLListAge {
+		return false
+	}
+
+	stored, err := h.repo.SiteURLList(ctx, site.ID, int64(site.URLLimit))
+	if err != nil {
+		logger.Error().Err(err).Msg("could not read the stored URL list; rebuilding")
+		return false
+	}
+	if len(stored) == 0 {
+		return false
+	}
+
+	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
+		logger.Error().Err(err).Msg("failed to init rate limiter")
+		_ = h.repo.SetCrawlingError(ctx, oid, "failed to init rate limiter")
+		return true
+	}
+
+	// Smart recrawl still applies: a stored list says what to crawl, not what
+	// is already warm.
+	cached := map[string]models.CrawlingResult{}
+	if site.SmartRecrawl {
+		if found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid); err == nil {
+			cached = found
+		}
+	}
+
+	var (
+		tasks        []models.CrawlTask
+		carryForward []models.CrawlingResult
+	)
+
+	for _, su := range stored {
+		if !allowsURL(crawling.URLType, su.URL) {
+			continue
+		}
+
+		isNew, err := h.dedup.MarkSeen(ctx, crawlingID, su.URLHash)
+		if err != nil || !isNew {
+			continue
+		}
+
+		if prev, ok := cached[su.URL]; ok {
+			carryForward = append(carryForward, prev)
+			continue
+		}
+
+		tasks = append(tasks, models.CrawlTask{
+			CrawlingID:  crawlingID,
+			SiteID:      site.ID.Hex(),
+			URL:         su.URL,
+			URLHash:     su.URLHash,
+			UserAgent:   site.UserAgent,
+			ExtractData: site.ExtractData,
+			MaxRetries:  h.cfg.CrawlerMaxRetries,
+			EnqueuedAt:  time.Now().Unix(),
+		})
+	}
+
+	if len(carryForward) > 0 {
+		if err := h.repo.CarryForwardResults(ctx, oid, carryForward); err != nil {
+			logger.Error().Err(err).Msg("failed to carry results forward")
+		}
+	}
+
+	if len(tasks) == 0 && len(carryForward) == 0 {
+		return false
+	}
+
+	for i := 0; i < len(tasks); i += 1000 {
+		end := min(i+1000, len(tasks))
+		if err := h.queue.EnqueueBatch(ctx, crawlingID, tasks[i:end]); err != nil {
+			logger.Error().Err(err).Msg("failed to enqueue batch from the stored list")
+		}
+	}
+
+	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, len(tasks)+len(carryForward))
+
+	logger.Info().
+		Int("from_stored_list", len(tasks)).
+		Int("carried_forward", len(carryForward)).
+		Time("list_built", *site.URLsBuiltAt).
+		Msg("crawling from the stored URL list")
+
+	if len(tasks) == 0 {
+		// Everything was still cached; nothing to fetch.
+		_ = h.repo.SetCrawlingCrawledURLs(ctx, oid, len(carryForward))
+		_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
+		_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
+		return true
+	}
+
+	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusRunning)
+	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusRunning)
+	_ = h.stateManager.AddActiveCrawling(ctx, crawlingID)
+
+	metrics.ActiveCrawlingsGauge.Inc()
+
+	return true
+}
+
+// GetSiteURLList reports what is in a site's stored URL list.
+func (h *Handler) GetSiteURLList(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	site, err := h.repo.GetSite(c.Request.Context(), siteID)
+	if err != nil || site == nil {
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "site not found", Code: "NOT_FOUND"})
+		return
+	}
+
+	pages, assets, err := h.repo.CountSiteURLs(c.Request.Context(), siteID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to count stored URLs")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to read the list", Code: "INTERNAL"})
+		return
+	}
+
+	stale := site.URLsBuiltAt == nil || time.Since(*site.URLsBuiltAt) > models.SiteURLListAge
+
+	c.JSON(http.StatusOK, gin.H{
+		"pages":    pages,
+		"assets":   assets,
+		"total":    pages + assets,
+		"built_at": site.URLsBuiltAt,
+		// stale means the next crawl rebuilds the list rather than reusing it.
+		"stale": stale,
+	})
+}
+
+// RefreshSiteURLList discards a site's stored list so the next crawl rebuilds
+// it from the source.
+//
+// The rows are removed rather than left to be overwritten: a URL that no
+// longer exists on the site would otherwise linger indefinitely, since nothing
+// would refresh its last_seen_at.
+func (h *Handler) RefreshSiteURLList(c *gin.Context) {
+	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "invalid site ID", Code: "INVALID_ID"})
+		return
+	}
+
+	if err := h.repo.ClearSiteURLs(c.Request.Context(), siteID); err != nil {
+		log.Error().Err(err).Msg("failed to clear the stored URL list")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to clear the list", Code: "INTERNAL"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"cleared": true,
+		"message": "The URL list will be rebuilt on the next crawl.",
+	})
 }
