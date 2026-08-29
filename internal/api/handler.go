@@ -332,6 +332,17 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 		speed = 72000
 	}
 
+	// Assets get their own ceiling, three times the page one. An image is
+	// usually served straight from disk or already sitting at the CDN edge,
+	// so the request costs the origin a fraction of what a page does.
+	assetSpeed := req.AssetSpeed
+	if assetSpeed < 0 {
+		assetSpeed = 0
+	}
+	if assetSpeed > models.MaxAssetSpeedPerHour {
+		assetSpeed = models.MaxAssetSpeedPerHour
+	}
+
 	// Default URL-type scope; "all" if unset or empty.
 	urlType := req.URLType
 	if urlType == "" {
@@ -343,6 +354,7 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 		SiteID:       siteID,
 		Status:       models.CrawlStatusPending,
 		Speed:        speed,
+		AssetSpeed:   assetSpeed,
 		ReloadSource: req.ReloadSource,
 		URLType:      urlType,
 	}
@@ -483,7 +495,7 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 	// passed the type filter and dedup.
 	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, len(urls))
 
-	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
+	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed, crawling.AssetSpeed); err != nil {
 		logger.Error().Err(err).Msg("failed to init rate limiter")
 		_ = h.repo.SetCrawlingError(ctx, oid, "failed to init rate limiter")
 		return
@@ -615,7 +627,7 @@ func (h *Handler) ingestAutoDiscovery(
 ) {
 	logger.Info().Str("base_url", site.BaseURL).Int("limit", site.URLLimit).Msg("starting auto discovery")
 
-	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
+	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed, crawling.AssetSpeed); err != nil {
 		logger.Error().Err(err).Msg("failed to init rate limiter")
 		_ = h.repo.SetCrawlingError(ctx, oid, "failed to init rate limiter")
 		return
@@ -1766,7 +1778,7 @@ func (h *Handler) useStoredURLList(
 		return false
 	}
 
-	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed); err != nil {
+	if err := h.rateLimiter.Init(ctx, crawlingID, crawling.Speed, crawling.AssetSpeed); err != nil {
 		logger.Error().Err(err).Msg("failed to init rate limiter")
 		_ = h.repo.SetCrawlingError(ctx, oid, "failed to init rate limiter")
 		return true

@@ -29,13 +29,41 @@ func tokensKey(crawlingID string) string { return fmt.Sprintf("crawl:%s:tokens",
 func refillKey(crawlingID string) string { return fmt.Sprintf("crawl:%s:tokens:refill", crawlingID) }
 func speedKey(crawlingID string) string  { return fmt.Sprintf("crawl:%s:speed", crawlingID) }
 
-// Init sets up the token bucket for a crawling job.
-func (rl *DistributedRateLimiter) Init(ctx context.Context, crawlingID string, speedPerHour int) error {
+// Assets get their own bucket. A page costs the origin a PHP request and a
+// handful of database queries; an image is usually served straight from disk
+// or already sitting at the CDN edge. Charging them against one budget meant
+// images crawled at page speed for no reason — on a site with 27,916 declared
+// images that is hours of waiting to warm files the origin barely notices.
+func assetTokensKey(crawlingID string) string {
+	return fmt.Sprintf("crawl:%s:asset_tokens", crawlingID)
+}
+
+func assetRefillKey(crawlingID string) string {
+	return fmt.Sprintf("crawl:%s:asset_tokens:refill", crawlingID)
+}
+
+func assetSpeedKey(crawlingID string) string {
+	return fmt.Sprintf("crawl:%s:asset_speed", crawlingID)
+}
+
+// Init sets up the token buckets for a crawling job.
+//
+// assetSpeedPerHour of 0 means assets share the page budget, which is the
+// behaviour from before assets had their own bucket.
+func (rl *DistributedRateLimiter) Init(ctx context.Context, crawlingID string, speedPerHour, assetSpeedPerHour int) error {
+	now := time.Now().UnixMilli()
+
 	pipe := rl.rdb.Pipeline()
 	pipe.Set(ctx, speedKey(crawlingID), speedPerHour, 0)
 	pipe.Set(ctx, tokensKey(crawlingID), 0, 0) // start empty, refill will add
-	pipe.Set(ctx, refillKey(crawlingID), time.Now().UnixMilli(), 0)
+	pipe.Set(ctx, refillKey(crawlingID), now, 0)
+
+	pipe.Set(ctx, assetSpeedKey(crawlingID), assetSpeedPerHour, 0)
+	pipe.Set(ctx, assetTokensKey(crawlingID), 0, 0)
+	pipe.Set(ctx, assetRefillKey(crawlingID), now, 0)
+
 	_, err := pipe.Exec(ctx)
+
 	return err
 }
 
@@ -100,6 +128,27 @@ func (rl *DistributedRateLimiter) Acquire(ctx context.Context, crawlingID string
 	return result, nil
 }
 
+// AcquireAssets consumes from the asset bucket instead of the page one.
+//
+// Falls back to the page bucket when no asset speed was configured, so a crawl
+// started before assets had their own budget behaves exactly as it used to.
+func (rl *DistributedRateLimiter) AcquireAssets(ctx context.Context, crawlingID string, count int) (int, error) {
+	speed, err := rl.rdb.Get(ctx, assetSpeedKey(crawlingID)).Int()
+	if err != nil || speed <= 0 {
+		return rl.Acquire(ctx, crawlingID, count)
+	}
+
+	result, err := acquireScript.Run(ctx, rl.rdb,
+		[]string{assetTokensKey(crawlingID), assetRefillKey(crawlingID), assetSpeedKey(crawlingID)},
+		count, time.Now().UnixMilli(),
+	).Int()
+	if err != nil {
+		return 0, err
+	}
+
+	return result, nil
+}
+
 // UpdateSpeed dynamically changes the crawl speed.
 func (rl *DistributedRateLimiter) UpdateSpeed(ctx context.Context, crawlingID string, speedPerHour int) error {
 	return rl.rdb.Set(ctx, speedKey(crawlingID), speedPerHour, 0).Err()
@@ -111,5 +160,8 @@ func (rl *DistributedRateLimiter) Cleanup(ctx context.Context, crawlingID string
 		tokensKey(crawlingID),
 		refillKey(crawlingID),
 		speedKey(crawlingID),
+		assetTokensKey(crawlingID),
+		assetRefillKey(crawlingID),
+		assetSpeedKey(crawlingID),
 	).Err()
 }

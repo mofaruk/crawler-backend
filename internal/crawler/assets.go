@@ -128,3 +128,29 @@ func extensionOf(rawURL string) string {
 
 	return strings.ToLower(path[i+1:])
 }
+
+// IsAssetURL reports whether a URL points at something served as a static
+// file — an image, stylesheet, script, font or media file — rather than a page.
+//
+// Used to decide which rate budget a request is charged to: a page costs the
+// origin a PHP request and database queries, an asset usually does not.
+func IsAssetURL(rawURL string) bool {
+	ext := extensionOf(rawURL)
+	if ext == "" {
+		return false
+	}
+
+	if imageExtensions[ext] {
+		return true
+	}
+
+	switch ext {
+	case "css", "js", "mjs", "map",
+		"woff", "woff2", "ttf", "otf", "eot",
+		"mp4", "webm", "ogg", "mp3", "wav", "avi", "mov",
+		"pdf", "zip", "gz", "ico":
+		return true
+	}
+
+	return false
+}

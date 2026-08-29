@@ -79,21 +79,27 @@ type Site struct {
 // --- Crawling (Job) ---
 
 type Crawling struct {
-	ID           primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	SiteID       primitive.ObjectID `bson:"site_id" json:"site_id"`
-	Status       CrawlStatus        `bson:"status" json:"status"`
-	Speed        int                `bson:"speed" json:"speed"` // URLs per hour
-	ReloadSource bool               `bson:"reload_source" json:"reload_source"`
-	URLType      string             `bson:"url_type,omitempty" json:"url_type,omitempty"` // "all" | "static" | "dynamic"
-	TotalURLs    int                `bson:"total_urls" json:"total_urls"`
-	CrawledURLs  int                `bson:"crawled_urls" json:"crawled_urls"`
-	FailedURLs   int                `bson:"failed_urls" json:"failed_urls"`
-	StartedAt    *time.Time         `bson:"started_at,omitempty" json:"started_at,omitempty"`
-	CompletedAt  *time.Time         `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
-	PausedAt     *time.Time         `bson:"paused_at,omitempty" json:"paused_at,omitempty"`
-	CreatedAt    time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt    time.Time          `bson:"updated_at" json:"updated_at"`
-	ErrorMessage string             `bson:"error_message,omitempty" json:"error_message,omitempty"`
+	ID     primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	SiteID primitive.ObjectID `bson:"site_id" json:"site_id"`
+	Status CrawlStatus        `bson:"status" json:"status"`
+	Speed  int                `bson:"speed" json:"speed"` // URLs per hour
+	// AssetSpeed is the separate budget for images, CSS, JS and fonts, also
+	// in URLs per hour. A page costs the origin a PHP request and database
+	// queries; an asset is usually served from disk or already at the CDN
+	// edge, so holding both to one rate made images crawl far slower than
+	// necessary. Zero means assets share the page budget.
+	AssetSpeed   int        `bson:"asset_speed" json:"asset_speed"`
+	ReloadSource bool       `bson:"reload_source" json:"reload_source"`
+	URLType      string     `bson:"url_type,omitempty" json:"url_type,omitempty"` // "all" | "static" | "dynamic"
+	TotalURLs    int        `bson:"total_urls" json:"total_urls"`
+	CrawledURLs  int        `bson:"crawled_urls" json:"crawled_urls"`
+	FailedURLs   int        `bson:"failed_urls" json:"failed_urls"`
+	StartedAt    *time.Time `bson:"started_at,omitempty" json:"started_at,omitempty"`
+	CompletedAt  *time.Time `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	PausedAt     *time.Time `bson:"paused_at,omitempty" json:"paused_at,omitempty"`
+	CreatedAt    time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt    time.Time  `bson:"updated_at" json:"updated_at"`
+	ErrorMessage string     `bson:"error_message,omitempty" json:"error_message,omitempty"`
 }
 
 // --- Crawl URL ---
@@ -220,6 +226,11 @@ const (
 // rebuilds it. Long enough that most crawls reuse the list, short enough that
 // a page added to the site is picked up without anyone pressing anything.
 const SiteURLListAge = 7 * 24 * time.Hour
+
+// maxAssetSpeedPerHour caps the asset budget at 100 requests a second.
+// Images are cheap for an origin to serve, but not free, and a ceiling stops
+// a misconfigured crawl from behaving like a denial of service.
+const MaxAssetSpeedPerHour = 360000
 
 // Asset warming modes, in increasing cost.
 const (
@@ -408,6 +419,7 @@ type UpdateSiteRequest struct {
 type StartCrawlingRequest struct {
 	SiteID       string `json:"site_id" binding:"required"`
 	Speed        int    `json:"speed"`
+	AssetSpeed   int    `json:"asset_speed"`
 	ReloadSource bool   `json:"reload_source"`
 	URLType      string `json:"url_type" binding:"omitempty,oneof=all static dynamic"`
 }

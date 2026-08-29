@@ -215,23 +215,76 @@ func (p *Pool) dispatchOne(ctx context.Context, crawlingID string) (sent int, go
 		want = free
 	}
 
-	acquired, err := p.rateLimiter.Acquire(ctx, crawlingID, want)
+	// Pages and assets have separate budgets: a page costs the origin a PHP
+	// request and database queries, while an asset is usually served straight
+	// from disk or already sitting at the CDN edge.
+	//
+	// The queue is FIFO and mixed, so the dispatcher cannot know what is next
+	// without looking. It draws on both buckets, then keeps only as many tasks
+	// as each budget actually covers and puts the rest back — so a page is
+	// never dispatched on the asset budget, and the page rate stays meaningful
+	// however the queue is ordered.
+	pageTokens, err := p.rateLimiter.Acquire(ctx, crawlingID, want)
 	if err != nil {
 		return 0, false, err
 	}
-	if acquired == 0 {
+
+	assetTokens, err := p.rateLimiter.AcquireAssets(ctx, crawlingID, want-pageTokens)
+	if err != nil {
+		assetTokens = 0
+	}
+
+	if pageTokens+assetTokens == 0 {
 		metrics.RateLimitWaits.WithLabelValues(crawlingID).Inc()
 		return 0, false, nil
 	}
-	metrics.RateLimitTokensAcquired.WithLabelValues(crawlingID).Add(float64(acquired))
 
-	tasks, err := p.queue.DequeueBatch(ctx, crawlingID, acquired)
+	tasks, err := p.queue.DequeueBatch(ctx, crawlingID, pageTokens+assetTokens)
 	if err != nil {
 		return 0, true, err
 	}
 
-	for i := range tasks {
-		t := tasks[i]
+	var (
+		dispatch []models.CrawlTask
+		requeue  []models.CrawlTask
+		pages    int
+		assets   int
+	)
+
+	for _, t := range tasks {
+		if crawler.IsAssetURL(t.URL) {
+			if assets < assetTokens {
+				assets++
+				dispatch = append(dispatch, t)
+				continue
+			}
+			// Out of asset budget, but a page token can cover it.
+			if pages < pageTokens {
+				pages++
+				dispatch = append(dispatch, t)
+				continue
+			}
+		} else if pages < pageTokens {
+			pages++
+			dispatch = append(dispatch, t)
+			continue
+		}
+
+		requeue = append(requeue, t)
+	}
+
+	// Whatever neither budget covered goes back at the head of the queue, so
+	// nothing is lost and ordering is preserved.
+	if len(requeue) > 0 {
+		if err := p.queue.EnqueueBatch(ctx, crawlingID, requeue); err != nil {
+			log.Error().Err(err).Int("count", len(requeue)).Msg("failed to requeue rate-limited tasks")
+		}
+	}
+
+	metrics.RateLimitTokensAcquired.WithLabelValues(crawlingID).Add(float64(len(dispatch)))
+
+	for i := range dispatch {
+		t := dispatch[i]
 		select {
 		case p.workCh <- dispatchedTask{crawlingID: crawlingID, task: &t}:
 			sent++
