@@ -95,6 +95,16 @@ func (r *MongoRepository) ensureIndexes(ctx context.Context) error {
 		return err
 	}
 
+	// site_urls indexes: the stored list is looked up per site, and rebuilt
+	// by upsert on (site_id, url_hash).
+	_, err = r.siteURLs().Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "site_id", Value: 1}, {Key: "url_hash", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "site_id", Value: 1}, {Key: "kind", Value: 1}}},
+	})
+	if err != nil {
+		return err
+	}
+
 	// crawl_urls indexes
 	_, err = r.crawlURLs().Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "crawling_id", Value: 1}, {Key: "status", Value: 1}}},
@@ -1218,4 +1228,119 @@ func (r *MongoRepository) BrokenOutboundLinks(
 	}
 
 	return links, nil
+}
+
+func (r *MongoRepository) siteURLs() *mongo.Collection {
+	return r.db.Collection("site_urls")
+}
+
+// RecordSiteURLs adds URLs to a site's stored list.
+//
+// Upserted rather than inserted so a rebuild refreshes last_seen_at instead of
+// duplicating, and so several crawl workers can contribute concurrently
+// without racing.
+func (r *MongoRepository) RecordSiteURLs(
+	ctx context.Context,
+	siteID primitive.ObjectID,
+	urls []models.SiteURL,
+) error {
+	if len(urls) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	writes := make([]mongo.WriteModel, 0, len(urls))
+
+	for _, u := range urls {
+		writes = append(writes, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"site_id": siteID, "url_hash": u.URLHash}).
+			SetUpdate(bson.M{
+				"$set": bson.M{"last_seen_at": now, "kind": u.Kind},
+				"$setOnInsert": bson.M{
+					"site_id":       siteID,
+					"url":           u.URL,
+					"url_hash":      u.URLHash,
+					"first_seen_at": now,
+				},
+			}).
+			SetUpsert(true))
+	}
+
+	// Unordered: one duplicate-key race must not abandon the rest of the batch.
+	_, err := r.siteURLs().BulkWrite(ctx, writes, options.BulkWrite().SetOrdered(false))
+
+	return err
+}
+
+// SiteURLList returns a site's stored URLs, pages first.
+//
+// Pages lead so that a crawl which runs out of budget has still warmed the
+// pages — an asset is only worth warming if the page referencing it is.
+func (r *MongoRepository) SiteURLList(
+	ctx context.Context,
+	siteID primitive.ObjectID,
+	limit int64,
+) ([]models.SiteURL, error) {
+	opts := options.Find().
+		SetSort(bson.D{{Key: "kind", Value: 1}, {Key: "_id", Value: 1}})
+	if limit > 0 {
+		opts.SetLimit(limit)
+	}
+
+	cur, err := r.siteURLs().Find(ctx, bson.M{"site_id": siteID}, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var urls []models.SiteURL
+	if err := cur.All(ctx, &urls); err != nil {
+		return nil, err
+	}
+
+	return urls, nil
+}
+
+// CountSiteURLs reports how many URLs are stored for a site, split by kind.
+func (r *MongoRepository) CountSiteURLs(ctx context.Context, siteID primitive.ObjectID) (pages, assets int64, err error) {
+	pages, err = r.siteURLs().CountDocuments(ctx, bson.M{"site_id": siteID, "kind": models.SiteURLKindPage})
+	if err != nil {
+		return 0, 0, err
+	}
+
+	assets, err = r.siteURLs().CountDocuments(ctx, bson.M{"site_id": siteID, "kind": models.SiteURLKindAsset})
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return pages, assets, nil
+}
+
+// ClearSiteURLs drops a site's stored list so the next crawl rebuilds it.
+//
+// Used by the refresh action: removing the rows is what makes the rebuild
+// authoritative, since a URL that no longer exists on the site would otherwise
+// linger forever on its last_seen_at.
+func (r *MongoRepository) ClearSiteURLs(ctx context.Context, siteID primitive.ObjectID) error {
+	_, err := r.siteURLs().DeleteMany(ctx, bson.M{"site_id": siteID})
+	if err != nil {
+		return err
+	}
+
+	// Clearing the timestamp too, so a crawl treats the list as never built
+	// rather than as freshly built and empty.
+	_, err = r.sites().UpdateByID(ctx, siteID, bson.M{"$unset": bson.M{"urls_built_at": ""}})
+
+	return err
+}
+
+// MarkSiteURLsBuilt records that a site's list has just been rebuilt.
+func (r *MongoRepository) MarkSiteURLsBuilt(ctx context.Context, siteID primitive.ObjectID) error {
+	now := time.Now()
+
+	_, err := r.sites().UpdateByID(ctx, siteID, bson.M{
+		"$set": bson.M{"urls_built_at": now, "updated_at": now},
+	})
+
+	return err
 }

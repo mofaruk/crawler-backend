@@ -68,8 +68,11 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		return
 	}
 
-	// url_source is required for csv/xml; for auto it is unused.
-	if req.URLSourceType != models.URLSourceTypeAuto && strings.TrimSpace(req.URLSource) == "" {
+	// url_source is required for csv/xml. Auto walks from base_url, and smart
+	// finds the sitemap itself, so neither needs one.
+	if req.URLSourceType != models.URLSourceTypeAuto &&
+		req.URLSourceType != models.URLSourceTypeSmart &&
+		strings.TrimSpace(req.URLSource) == "" {
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{
 			Error: "url_source is required when url_source_type is 'csv' or 'xml'",
 			Code:  "INVALID_REQUEST",
@@ -382,15 +385,35 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		return
 	}
 
+	// Smart: find the sitemap rather than making the customer supply it. The
+	// pages it lists are crawled like any XML source; the assets those pages
+	// load are harvested as the crawl runs.
+	source := site.URLSource
+	sourceType := site.URLSourceType
+
+	if sourceType == models.URLSourceTypeSmart {
+		found, err := h.resolveSmartSource(ctx, site)
+		if err != nil {
+			logger.Error().Err(err).Str("base_url", site.BaseURL).Msg("smart source could not find a sitemap")
+			_ = h.repo.SetCrawlingError(ctx, oid, "could not find a sitemap for "+site.BaseURL+
+				" — set the sitemap URL manually, or upload a CSV")
+			return
+		}
+
+		logger.Info().Str("sitemap", found).Msg("smart source resolved a sitemap")
+		source = found
+		sourceType = models.URLSourceTypeXML
+	}
+
 	// --- Static-source (CSV / XML) path ---
 
 	logger.Info().
-		Str("source", site.URLSource).
-		Str("source_type", site.URLSourceType).
+		Str("source", source).
+		Str("source_type", sourceType).
 		Int("url_limit", site.URLLimit).
 		Msg("fetching URL source")
 
-	urls, stats, err := h.parser.ParseURLs(ctx, site.URLSource, site.URLSourceType, site.UserAgent, site.URLLimit)
+	urls, stats, err := h.parser.ParseURLs(ctx, source, sourceType, site.UserAgent, site.URLLimit)
 	if err != nil {
 		logger.Error().Err(err).Interface("parse_stats", stats).Msg("failed to parse URL source")
 		msg := "failed to parse URL source: " + err.Error()
@@ -1649,4 +1672,27 @@ func (h *Handler) GetBrokenLinks(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": links, "count": len(links)})
+}
+
+// resolveSmartSource locates the sitemap a smart-source site should crawl.
+//
+// The result is not stored on the site: a customer who moves from Yoast to
+// RankMath gets the new location on the next crawl without anyone editing
+// anything, which is the point of the mode.
+func (h *Handler) resolveSmartSource(ctx context.Context, site *models.Site) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	candidates, err := h.parser.FindSitemaps(ctx, site.BaseURL, site.UserAgent, h.cfg.AllowPrivateTargets)
+	if err != nil {
+		return "", err
+	}
+
+	for _, c := range candidates {
+		if c.Found && c.URLCount > 0 {
+			return c.URL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no sitemap found at %s", site.BaseURL)
 }

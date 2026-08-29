@@ -28,6 +28,10 @@ const (
 	URLSourceTypeCSV  = "csv"
 	URLSourceTypeXML  = "xml"
 	URLSourceTypeAuto = "auto" // auto-discover by crawling base_url
+	// URLSourceTypeSmart finds the site's sitemap itself, crawls the pages it
+	// lists, and warms the assets those pages load. The customer supplies a
+	// domain and nothing else, which is what most of them actually want.
+	URLSourceTypeSmart = "smart"
 )
 
 // CrawlURLType narrows which URLs a crawling job actually fetches. Classified
@@ -56,6 +60,10 @@ type Site struct {
 	// avoids almost all the work — at the cost of not learning whether those
 	// pages are *still* cached, which is why it is opt-in per site.
 	SmartRecrawl  bool               `bson:"smart_recrawl" json:"smart_recrawl"`
+
+	// URLsBuiltAt is when the stored URL list was last rebuilt. Nil means no
+	// list has been built yet, so the next crawl derives one.
+	URLsBuiltAt *time.Time `bson:"urls_built_at,omitempty" json:"urls_built_at,omitempty"`
 
 	// AssetMode decides how much of what a page loads gets warmed.
 	//
@@ -182,6 +190,37 @@ type CrawlTask struct {
 	EnqueuedAt  int64    `json:"enqueued_at"`
 }
 
+// SiteURL is one URL known to belong to a site, kept between crawls.
+//
+// Deriving the list means fetching and parsing every page — on a real customer
+// site, 341 pages to find 13,209 assets. Doing that on every round is most of
+// the crawl's cost spent rediscovering what did not change, so the list is
+// stored and reused, and refreshed on demand or once it ages out.
+type SiteURL struct {
+	ID      primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	SiteID  primitive.ObjectID `bson:"site_id" json:"site_id"`
+	URL     string             `bson:"url" json:"url"`
+	URLHash string             `bson:"url_hash" json:"url_hash"`
+
+	// Kind separates the pages a source listed from the assets those pages
+	// reference, so a report can say how much of a crawl is each.
+	Kind string `bson:"kind" json:"kind"` // "page" | "asset"
+
+	FirstSeenAt time.Time `bson:"first_seen_at" json:"first_seen_at"`
+	LastSeenAt  time.Time `bson:"last_seen_at" json:"last_seen_at"`
+}
+
+// URL kinds.
+const (
+	SiteURLKindPage  = "page"
+	SiteURLKindAsset = "asset"
+)
+
+// SiteURLListAge is how long a stored URL list is trusted before a crawl
+// rebuilds it. Long enough that most crawls reuse the list, short enough that
+// a page added to the site is picked up without anyone pressing anything.
+const SiteURLListAge = 7 * 24 * time.Hour
+
 // Asset warming modes, in increasing cost.
 const (
 	// AssetModeNone warms only the URLs the source lists — pages, plus any
@@ -280,7 +319,7 @@ type CreateSiteRequest struct {
 	BaseURL       string `json:"base_url" binding:"required,url"`
 	URLLimit      int    `json:"url_limit" binding:"required,min=1"`
 	URLSource     string `json:"url_source" binding:"omitempty,url"` // required unless url_source_type is "auto"
-	URLSourceType string `json:"url_source_type" binding:"required,oneof=csv xml auto"`
+	URLSourceType string `json:"url_source_type" binding:"required,oneof=csv xml auto smart"`
 	UserAgent     string `json:"user_agent"`
 	ExtractData   string `json:"extract_data"` // comma-separated header names
 	SmartRecrawl  bool   `json:"smart_recrawl"`
@@ -292,7 +331,7 @@ type UpdateSiteRequest struct {
 	BaseURL       *string `json:"base_url" binding:"omitempty,url"`
 	URLLimit      *int    `json:"url_limit" binding:"omitempty,min=1"`
 	URLSource     *string `json:"url_source" binding:"omitempty,url"`
-	URLSourceType *string `json:"url_source_type" binding:"omitempty,oneof=csv xml auto"`
+	URLSourceType *string `json:"url_source_type" binding:"omitempty,oneof=csv xml auto smart"`
 	UserAgent     *string `json:"user_agent"`
 	ExtractData   *string `json:"extract_data"`
 	SmartRecrawl  *bool   `json:"smart_recrawl"`
