@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/webkonsulenterne/crawler-backend/internal/adaptive"
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/crawler"
 	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
@@ -70,9 +71,12 @@ func main() {
 	// deduped against the same set the sitemap URLs were, so an image
 	// referenced from two hundred pages is queued once.
 	dd := dedup.NewDeduplicator(rdb)
+	// Watches page response times and eases the crawl back when a site starts
+	// struggling, so a crawl never becomes the reason a customer's site is slow.
+	ad := adaptive.New(rdb)
 
 	// Create worker pool
-	pool := worker.NewPool(cfg, q, sm, rl, fetcher, repo, dd)
+	pool := worker.NewPool(cfg, q, sm, rl, fetcher, repo, dd, ad)
 
 	// --- Metrics Server ---
 	metricsSrv := &http.Server{

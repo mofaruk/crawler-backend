@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
+	"github.com/webkonsulenterne/crawler-backend/internal/adaptive"
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
 	"github.com/webkonsulenterne/crawler-backend/internal/crawler"
 	"github.com/webkonsulenterne/crawler-backend/internal/dedup"
@@ -52,6 +53,7 @@ type Pool struct {
 	fetcher      *crawler.HTTPFetcher
 	repo         *repository.MongoRepository
 	dedup        *dedup.Deduplicator
+	adaptive     *adaptive.Controller
 
 	workCh        chan dispatchedTask
 	activeWorkers atomic.Int64
@@ -67,6 +69,7 @@ func NewPool(
 	fetcher *crawler.HTTPFetcher,
 	repo *repository.MongoRepository,
 	dd *dedup.Deduplicator,
+	ad *adaptive.Controller,
 ) *Pool {
 	return &Pool{
 		cfg:          cfg,
@@ -76,6 +79,7 @@ func NewPool(
 		fetcher:      fetcher,
 		repo:         repo,
 		dedup:        dd,
+		adaptive:     ad,
 	}
 }
 
@@ -377,6 +381,15 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 		ResponseTime: result.ResponseTime.Milliseconds(),
 		CrawledAt:    time.Now(),
 		RedirectedTo: result.RedirectedTo,
+	}
+
+	// Adjust the crawl rate from how the site is holding up.
+	//
+	// Pages only, deliberately: an image is served from disk or the CDN edge
+	// and stays fast while PHP is drowning, so counting it here would mask the
+	// overload this exists to detect.
+	if p.adaptive != nil && !crawler.IsAssetURL(task.URL) {
+		p.adjustSpeed(ctx, crawlingID, result.ResponseTime.Milliseconds())
 	}
 
 	// Assets the page references — images, stylesheets, scripts, fonts. A
@@ -699,4 +712,41 @@ func (p *Pool) queueAssets(ctx context.Context, crawlingID string, task *models.
 	if oid, err := primitive.ObjectIDFromHex(crawlingID); err == nil {
 		_ = p.repo.IncCrawlingTotalURLs(ctx, oid, len(tasks))
 	}
+}
+
+// adjustSpeed lets the controller raise or lower the page rate for this crawl.
+//
+// Never fatal: a crawl that cannot adapt is still a working crawl, and the
+// site's configured speed remains the ceiling either way.
+func (p *Pool) adjustSpeed(ctx context.Context, crawlingID string, responseMs int64) {
+	oid, err := primitive.ObjectIDFromHex(crawlingID)
+	if err != nil {
+		return
+	}
+
+	crawling, err := p.repo.GetCrawling(ctx, oid)
+	if err != nil || crawling == nil || crawling.Speed <= 0 {
+		return
+	}
+
+	current, err := p.rateLimiter.CurrentSpeed(ctx, crawlingID)
+	if err != nil || current <= 0 {
+		current = crawling.Speed
+	}
+
+	decision, err := p.adaptive.Observe(ctx, crawlingID, responseMs, current, crawling.Speed)
+	if err != nil || !decision.Changed {
+		return
+	}
+
+	if err := p.rateLimiter.UpdateSpeed(ctx, crawlingID, decision.NewSpeed); err != nil {
+		log.Warn().Err(err).Msg("failed to apply adaptive speed change")
+		return
+	}
+
+	log.Info().
+		Str("crawling_id", crawlingID).
+		Int("from", current).
+		Int("to", decision.NewSpeed).
+		Msg(decision.Reason)
 }

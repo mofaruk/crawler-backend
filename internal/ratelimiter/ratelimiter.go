@@ -165,3 +165,9 @@ func (rl *DistributedRateLimiter) Cleanup(ctx context.Context, crawlingID string
 		assetSpeedKey(crawlingID),
 	).Err()
 }
+
+// CurrentSpeed reports the rate a crawl is running at, which may be below the
+// configured speed if the site was struggling and the crawl backed off.
+func (rl *DistributedRateLimiter) CurrentSpeed(ctx context.Context, crawlingID string) (int, error) {
+	return rl.rdb.Get(ctx, speedKey(crawlingID)).Int()
+}
