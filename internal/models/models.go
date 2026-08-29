@@ -258,6 +258,70 @@ func NormalizeAssetMode(mode string) string {
 	}
 }
 
+// --- Alerts ---
+
+// AlertEvent is something that changed on a site, worth telling its owner
+// about.
+//
+// Alerts are emitted on *change*, never on state: "3 pages started failing" is
+// worth an interruption, "12 pages are still failing" is not, and firing the
+// latter every round is how a monitoring product gets filtered into a folder.
+// Everything here is therefore computed by comparing one completed round to
+// the one before it.
+type AlertEvent struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	SiteID     primitive.ObjectID `bson:"site_id" json:"site_id"`
+	CrawlingID primitive.ObjectID `bson:"crawling_id" json:"crawling_id"`
+
+	Kind     string `bson:"kind" json:"kind"`
+	Severity int    `bson:"severity" json:"severity"`
+
+	// Title is the whole alert in one line; Detail adds the numbers.
+	Title  string `bson:"title" json:"title"`
+	Detail string `bson:"detail" json:"detail"`
+
+	// Count is how many URLs the alert covers, and Examples a handful of them.
+	// A footer image that broke on four hundred pages is one alert with a
+	// count, not four hundred alerts.
+	Count    int      `bson:"count" json:"count"`
+	Examples []string `bson:"examples,omitempty" json:"examples,omitempty"`
+
+	// Resolved marks a recovery: the thing that was wrong no longer is.
+	// Telling someone their site healed is as useful as telling them it broke.
+	Resolved bool `bson:"resolved" json:"resolved"`
+
+	DismissedAt *time.Time `bson:"dismissed_at,omitempty" json:"dismissed_at,omitempty"`
+	CreatedAt   time.Time  `bson:"created_at" json:"created_at"`
+}
+
+// Alert kinds.
+const (
+	AlertNewlyBroken     = "newly_broken"
+	AlertRecovered       = "recovered"
+	AlertCacheRegression = "cache_regression"
+	AlertSlower          = "slower"
+	AlertNewIssues       = "new_issues"
+)
+
+// Alert thresholds. Deliberately generous: a detector that cries wolf is worse
+// than one that stays quiet, because people stop reading the quiet one too.
+const (
+	// A cache percentage has to fall by more than this to count. Normal
+	// variation between rounds is a few points.
+	CacheDropThresholdPct = 15.0
+
+	// Response times move for reasons outside the customer's control, so a
+	// site has to get half again slower before it is worth saying so.
+	SlowdownFactor = 1.5
+
+	// Below this many URLs the percentages are too noisy to compare.
+	MinURLsForComparison = 20
+
+	// However bad a round is, one site cannot produce more than this many
+	// alerts from it.
+	MaxAlertsPerRound = 6
+)
+
 // --- External Links ---
 
 // OutboundLink is one external destination a site links to, with the pages it
