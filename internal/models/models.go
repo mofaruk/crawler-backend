@@ -56,6 +56,14 @@ type Site struct {
 	// avoids almost all the work — at the cost of not learning whether those
 	// pages are *still* cached, which is why it is opt-in per site.
 	SmartRecrawl  bool               `bson:"smart_recrawl" json:"smart_recrawl"`
+
+	// AssetMode decides how much of what a page loads gets warmed.
+	//
+	// A page references far more than a sitemap lists: on one real customer
+	// site, 341 pages reference 13,209 assets, most of them responsive
+	// variants of the same image. Warming all of them is 39x the work of
+	// crawling the pages alone, so this is a choice rather than a default.
+	AssetMode string `bson:"asset_mode" json:"asset_mode"`
 	CreatedAt     time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt     time.Time          `bson:"updated_at" json:"updated_at"`
 }
@@ -174,6 +182,43 @@ type CrawlTask struct {
 	EnqueuedAt  int64    `json:"enqueued_at"`
 }
 
+// Asset warming modes, in increasing cost.
+const (
+	// AssetModeNone warms only the URLs the source lists — pages, plus any
+	// images the sitemap itself declares.
+	AssetModeNone = "none"
+
+	// AssetModeTopVariants warms each image at its largest two sizes and
+	// skips the rest. Most images are generated in six to eight sizes while a
+	// visitor loads one or two, so this covers desktop and mobile at roughly
+	// 40% of the cost of warming every variant. The default.
+	AssetModeTopVariants = "top_variants"
+
+	// AssetModeImages warms every image variant, but not stylesheets,
+	// scripts or fonts.
+	AssetModeImages = "images"
+
+	// AssetModeAll warms everything a page loads, including CSS, JS, fonts
+	// and next-gen formats such as AVIF.
+	AssetModeAll = "all"
+)
+
+// NormalizeAssetMode maps a stored or supplied value to a known mode,
+// defaulting to top_variants — the setting worth having on for most sites
+// without surprising anyone with a 39x crawl.
+func NormalizeAssetMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case AssetModeNone:
+		return AssetModeNone
+	case AssetModeImages:
+		return AssetModeImages
+	case AssetModeAll:
+		return AssetModeAll
+	default:
+		return AssetModeTopVariants
+	}
+}
+
 // --- External Links ---
 
 // OutboundLink is one external destination a site links to, with the pages it
@@ -239,6 +284,7 @@ type CreateSiteRequest struct {
 	UserAgent     string `json:"user_agent"`
 	ExtractData   string `json:"extract_data"` // comma-separated header names
 	SmartRecrawl  bool   `json:"smart_recrawl"`
+	AssetMode     string `json:"asset_mode"`
 }
 
 type UpdateSiteRequest struct {
@@ -250,6 +296,7 @@ type UpdateSiteRequest struct {
 	UserAgent     *string `json:"user_agent"`
 	ExtractData   *string `json:"extract_data"`
 	SmartRecrawl  *bool   `json:"smart_recrawl"`
+	AssetMode     *string `json:"asset_mode" binding:"omitempty,oneof=none top_variants images all"`
 }
 
 type StartCrawlingRequest struct {

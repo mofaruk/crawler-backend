@@ -540,11 +540,22 @@ func (p *Pool) queueAssets(ctx context.Context, crawlingID string, task *models.
 	// The site's url_limit is a promise about how many requests a crawl makes
 	// against the customer's origin. Assets are requests, so discovery stops
 	// once the crawl has as many URLs as the limit allows.
-	var limit int
+	var (
+		limit int
+		mode  = models.AssetModeTopVariants
+	)
 	if oid, err := primitive.ObjectIDFromHex(task.SiteID); err == nil {
 		if site, err := p.repo.GetSite(ctx, oid); err == nil && site != nil {
 			limit = site.URLLimit
+			mode = models.NormalizeAssetMode(site.AssetMode)
 		}
+	}
+
+	// Narrow to what this site actually wants warmed before spending any of
+	// the budget on it.
+	refs = crawler.FilterAssets(refs, mode)
+	if len(refs) == 0 {
+		return
 	}
 
 	// Counted once and tracked locally: a Count per asset would be hundreds of

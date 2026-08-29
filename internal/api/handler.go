@@ -115,6 +115,7 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		UserAgent:     userAgent,
 		ExtractData:   extractData,
 		SmartRecrawl:  req.SmartRecrawl,
+		AssetMode:     models.NormalizeAssetMode(req.AssetMode),
 	}
 
 	if err := h.repo.CreateSite(c.Request.Context(), site); err != nil {
@@ -220,6 +221,9 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 	}
 	if req.SmartRecrawl != nil {
 		update["smart_recrawl"] = *req.SmartRecrawl
+	}
+	if req.AssetMode != nil {
+		update["asset_mode"] = models.NormalizeAssetMode(*req.AssetMode)
 	}
 
 	if len(update) == 0 {
