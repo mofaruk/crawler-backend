@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -31,6 +32,12 @@ func seenKey(crawlingID string) string {
 	return fmt.Sprintf("crawl:%s:seen", crawlingID)
 }
 
+// Deleting the set when a crawl finishes covers the normal path, but a crawl
+// that fails or whose process is killed never reaches that code and would leak
+// its set forever. The TTL is refreshed on every write, so it only fires once a
+// crawl has genuinely stopped discovering URLs — well beyond any real run.
+const seenTTL = 48 * time.Hour
+
 // HashURL produces a compact hash of a URL for dedup purposes.
 func HashURL(url string) string {
 	h := sha256.Sum256([]byte(url))
@@ -44,34 +51,44 @@ func (d *Deduplicator) IsSeen(ctx context.Context, crawlingID, urlHash string) (
 
 // MarkSeen marks a URL as seen. Returns true if it was newly added (not duplicate).
 func (d *Deduplicator) MarkSeen(ctx context.Context, crawlingID, urlHash string) (bool, error) {
-	result, err := d.rdb.SAdd(ctx, seenKey(crawlingID), urlHash).Result()
+	key := seenKey(crawlingID)
+	var added *redis.IntCmd
+	// Pipelined so refreshing the TTL costs no extra round trip: this runs once
+	// per discovered asset URL.
+	_, err := d.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		added = pipe.SAdd(ctx, key, urlHash)
+		pipe.Expire(ctx, key, seenTTL)
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-	return result > 0, nil // result is number of elements added (0 if already exists)
+	return added.Val() > 0, nil // number of elements added (0 if already exists)
 }
 
 // MarkSeenBatch marks multiple URL hashes and returns which ones were new.
 var markSeenBatchScript = redis.NewScript(`
 local key = KEYS[1]
+local ttl = tonumber(ARGV[1])
 local new_count = 0
-local new_hashes = {}
 
-for i = 1, #ARGV do
+for i = 2, #ARGV do
     local added = redis.call('SADD', key, ARGV[i])
     if added == 1 then
         new_count = new_count + 1
-        table.insert(new_hashes, ARGV[i])
     end
 end
+
+redis.call('EXPIRE', key, ttl)
 
 return new_count
 `)
 
 func (d *Deduplicator) MarkSeenBatch(ctx context.Context, crawlingID string, hashes []string) (int, error) {
-	args := make([]interface{}, len(hashes))
-	for i, h := range hashes {
-		args[i] = h
+	args := make([]interface{}, 0, len(hashes)+1)
+	args = append(args, int(seenTTL.Seconds()))
+	for _, h := range hashes {
+		args = append(args, h)
 	}
 
 	result, err := markSeenBatchScript.Run(ctx, d.rdb,

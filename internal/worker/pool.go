@@ -521,6 +521,14 @@ func (p *Pool) checkJobCompletion(ctx context.Context, crawlingID string) {
 	_ = p.stateManager.RemoveActiveCrawling(ctx, crawlingID)
 	_ = p.repo.UpdateCrawlingStatus(ctx, mustObjectID(crawlingID), models.CrawlStatusCompleted)
 
+	// Release the crawl's Redis state, exactly as StopCrawling does. Only the
+	// stop path used to do this, so a crawl that simply finished kept its
+	// dedup set for good: ~11k leaked sets had grown Redis to ~1GB, which is
+	// what corrupted its AOF and took the backend down.
+	_ = p.queue.DeleteQueue(ctx, crawlingID)
+	_ = p.dedup.Cleanup(ctx, crawlingID)
+	_ = p.rateLimiter.Cleanup(ctx, crawlingID)
+
 	metrics.ActiveCrawlingsGauge.Dec()
 }
 
