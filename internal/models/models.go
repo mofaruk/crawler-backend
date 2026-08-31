@@ -682,7 +682,22 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 				fmt.Sprintf("%d <h1> elements", p.H1Count), SeverityInfo)
 		}
 
-		if p.WordCount > 0 && p.WordCount < thinContentWords {
+		// A 200 with no words at all is not thin content, it is a blank page:
+		// the visitor sees nothing and the search engine indexes nothing,
+		// while every status-code monitor reports the site healthy. Seen in
+		// the wild when a page-cache plugin caches an empty response and marks
+		// it as never expiring — the site then serves that blank page forever.
+		//
+		// Checked before thin_content because that check requires WordCount>0
+		// (to skip assets, which have no words either) and so cannot see the
+		// worst case it is meant to describe.
+		switch {
+		case p.WordCount == 0 && p.Title == "" && p.H1Count == 0:
+			add("blank_page", "Page is empty",
+				"Returns HTTP 200 with no content at all — visitors see a blank page",
+				SeverityCritical)
+
+		case p.WordCount > 0 && p.WordCount < thinContentWords:
 			add("thin_content", "Very little content",
 				fmt.Sprintf("About %d words", p.WordCount), SeverityInfo)
 		}
