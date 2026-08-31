@@ -61,6 +61,21 @@ type Site struct {
 	// pages are *still* cached, which is why it is opt-in per site.
 	SmartRecrawl bool `bson:"smart_recrawl" json:"smart_recrawl"`
 
+	// SmartRecrawlMaxAgeHours bounds how long a cached result may be reused
+	// before the URL is fetched again anyway.
+	//
+	// Without a bound smart recrawl converges on crawling nothing: a HIT is
+	// skipped, so it is never re-fetched, so it stays HIT in the record
+	// forever — the crawl shrinks to zero while the dashboard keeps reporting
+	// a cache percentage measured weeks ago. Worse, this crawler *creates*
+	// the cache it measures, so pages nothing re-warms quietly expire at the
+	// CDN while still being reported as cached.
+	//
+	// Zero or unset means SmartRecrawlDefaultMaxAgeHours, not "no bound":
+	// sites created before this field existed must not keep the old
+	// skip-forever behaviour.
+	SmartRecrawlMaxAgeHours int `bson:"smart_recrawl_max_age_hours,omitempty" json:"smart_recrawl_max_age_hours,omitempty"`
+
 	// URLsBuiltAt is when the stored URL list was last rebuilt. Nil means no
 	// list has been built yet, so the next crawl derives one.
 	URLsBuiltAt *time.Time `bson:"urls_built_at,omitempty" json:"urls_built_at,omitempty"`
@@ -226,6 +241,38 @@ const (
 // rebuilds it. Long enough that most crawls reuse the list, short enough that
 // a page added to the site is picked up without anyone pressing anything.
 const SiteURLListAge = 7 * 24 * time.Hour
+
+// Re-check windows offered for smart recrawl, in hours.
+//
+// Hours only, and no "never": an unbounded option would reintroduce the
+// permanent-skip behaviour this bound exists to remove, and a URL that has
+// not been verified within a day is not something to report as cached.
+var SmartRecrawlMaxAgeChoices = []int{1, 2, 3, 6, 12, 24}
+
+// SmartRecrawlDefaultMaxAgeHours is used when a site has smart recrawl on but
+// no window set — including every site created before the field existed.
+//
+// A day: long enough that a well-cached site still skips nearly everything
+// between daily crawls, short enough that a page falling out of cache is
+// caught within one crawl cycle rather than never.
+const SmartRecrawlDefaultMaxAgeHours = 24
+
+// SmartRecrawlMaxAge resolves a site's configured window, falling back to the
+// default and clamping anything out of range. Callers must use this rather
+// than reading the field, so an absent or corrupt value can never mean
+// "reuse this result forever".
+func (s *Site) SmartRecrawlMaxAge() time.Duration {
+	h := s.SmartRecrawlMaxAgeHours
+
+	if h <= 0 {
+		h = SmartRecrawlDefaultMaxAgeHours
+	}
+	if h > SmartRecrawlMaxAgeChoices[len(SmartRecrawlMaxAgeChoices)-1] {
+		h = SmartRecrawlMaxAgeChoices[len(SmartRecrawlMaxAgeChoices)-1]
+	}
+
+	return time.Duration(h) * time.Hour
+}
 
 // maxAssetSpeedPerHour caps the asset budget at 100 requests a second.
 // Images are cheap for an origin to serve, but not free, and a ceiling stops
@@ -401,7 +448,10 @@ type CreateSiteRequest struct {
 	UserAgent     string `json:"user_agent"`
 	ExtractData   string `json:"extract_data"` // comma-separated header names
 	SmartRecrawl  bool   `json:"smart_recrawl"`
-	AssetMode     string `json:"asset_mode"`
+	// 0 means "use the default"; the model resolves it. Bounded to the
+	// offered windows so an unbounded value cannot be set through the API.
+	SmartRecrawlMaxAgeHours int    `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
+	AssetMode               string `json:"asset_mode"`
 }
 
 type UpdateSiteRequest struct {
@@ -413,6 +463,7 @@ type UpdateSiteRequest struct {
 	UserAgent     *string `json:"user_agent"`
 	ExtractData   *string `json:"extract_data"`
 	SmartRecrawl  *bool   `json:"smart_recrawl"`
+	SmartRecrawlMaxAgeHours *int `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
 	AssetMode     *string `json:"asset_mode" binding:"omitempty,oneof=none top_variants images all"`
 }
 

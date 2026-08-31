@@ -923,10 +923,16 @@ func (r *MongoRepository) PruneCrawlingsBefore(ctx context.Context, siteID primi
 // Only a HIT-family status counts. A MISS or BYPASS last time is exactly the
 // URL worth checking again, and an absent CF-Cache-Status means the CDN is
 // not answering for it at all.
+//
+// maxAge bounds how long a result may be reused. A result is only reusable
+// while its *original* fetch is within the window — carrying a row forward
+// refreshes crawled_at every round, so measuring against that would let a
+// result be renewed indefinitely and never re-fetched.
 func (r *MongoRepository) CachedResultsFromLastCrawl(
 	ctx context.Context,
 	siteID primitive.ObjectID,
 	excludeCrawlingID primitive.ObjectID,
+	maxAge time.Duration,
 ) (map[string]models.CrawlingResult, error) {
 	var last models.Crawling
 	err := r.crawlings().FindOne(ctx,
@@ -945,10 +951,23 @@ func (r *MongoRepository) CachedResultsFromLastCrawl(
 		return nil, err
 	}
 
+	// The age to compare is when the URL was actually fetched: on a carried
+	// row that is original_crawled_at, and on a freshly fetched one there is
+	// no such field, so crawled_at is the real time. $ifNull picks whichever
+	// applies rather than trusting crawled_at, which every carry-forward
+	// resets to now.
+	cutoff := time.Now().Add(-maxAge)
+
 	cursor, err := r.crawlingResults().Find(ctx, bson.M{
 		"crawling_id": last.ID,
 		"headers.CF-Cache-Status": bson.M{
 			"$in": bson.A{"HIT", "REVALIDATED", "UPDATING"},
+		},
+		"$expr": bson.M{
+			"$gte": bson.A{
+				bson.M{"$ifNull": bson.A{"$original_crawled_at", "$crawled_at"}},
+				cutoff,
+			},
 		},
 	})
 	if err != nil {

@@ -127,7 +127,10 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		UserAgent:     userAgent,
 		ExtractData:   extractData,
 		SmartRecrawl:  req.SmartRecrawl,
-		AssetMode:     models.NormalizeAssetMode(req.AssetMode),
+		// Zero is preserved rather than defaulted here: the model resolves it,
+		// so the default lives in one place and applies to old rows too.
+		SmartRecrawlMaxAgeHours: req.SmartRecrawlMaxAgeHours,
+		AssetMode:               models.NormalizeAssetMode(req.AssetMode),
 	}
 
 	if err := h.repo.CreateSite(c.Request.Context(), site); err != nil {
@@ -236,6 +239,9 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 	}
 	if req.SmartRecrawl != nil {
 		update["smart_recrawl"] = *req.SmartRecrawl
+	}
+	if req.SmartRecrawlMaxAgeHours != nil {
+		update["smart_recrawl_max_age_hours"] = *req.SmartRecrawlMaxAgeHours
 	}
 	if req.AssetMode != nil {
 		update["asset_mode"] = models.NormalizeAssetMode(*req.AssetMode)
@@ -480,7 +486,7 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 	// re-fetched.
 	cached := map[string]models.CrawlingResult{}
 	if site.SmartRecrawl {
-		found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid)
+		found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid, site.SmartRecrawlMaxAge())
 		if err != nil {
 			// Not fatal: fall back to crawling everything, which is correct,
 			// just slower than the customer asked for.
@@ -1788,7 +1794,7 @@ func (h *Handler) useStoredURLList(
 	// is already warm.
 	cached := map[string]models.CrawlingResult{}
 	if site.SmartRecrawl {
-		if found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid); err == nil {
+		if found, err := h.repo.CachedResultsFromLastCrawl(ctx, site.ID, oid, site.SmartRecrawlMaxAge()); err == nil {
 			cached = found
 		}
 	}
