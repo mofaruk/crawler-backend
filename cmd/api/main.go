@@ -99,6 +99,7 @@ func main() {
 	router.GET("/sites/:id/analytics", handler.GetSiteAnalytics)
 	router.GET("/sites/:id/issues", handler.GetSiteIssues)
 	router.GET("/sites/:id/timeline", handler.GetSiteTimeline)
+	router.GET("/sites/:id/alerts", handler.ListSiteAlerts)
 	router.GET("/sites/:id/urls", handler.GetSiteURLList)
 	router.POST("/sites/:id/urls/refresh", handler.RefreshSiteURLList)
 	router.POST("/sites/:id/links/check", handler.CheckSiteLinks)
@@ -126,6 +127,11 @@ func main() {
 	router.GET("/crawlings/:id/urls", handler.ListCrawledURLs)
 	router.GET("/crawlings/:id/urls/tail", handler.TailCrawledURLs)
 	router.GET("/crawlings/:id/urls/export", handler.ExportCrawledURLs)
+
+	// Alerts. Detection happens when a round finishes; these only read what it
+	// found, and let the dashboard mark one dealt with.
+	router.POST("/alerts/delivery", handler.AlertsForDelivery)
+	router.POST("/alerts/:id/dismiss", handler.DismissAlert)
 
 	// --- Metrics Server ---
 	metricsSrv := &http.Server{

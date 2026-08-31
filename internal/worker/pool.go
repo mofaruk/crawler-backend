@@ -530,6 +530,63 @@ func (p *Pool) checkJobCompletion(ctx context.Context, crawlingID string) {
 	_ = p.rateLimiter.Cleanup(ctx, crawlingID)
 
 	metrics.ActiveCrawlingsGauge.Dec()
+
+	p.detectAlerts(ctx, mustObjectID(crawlingID))
+}
+
+// detectAlerts compares the round that just finished against the previous one
+// and stores whatever changed.
+//
+// Every failure here is logged and swallowed. The crawl is already complete
+// and its results are already stored; failing to work out whether anything
+// changed must not undo that, and there is nothing the customer could do about
+// it anyway.
+func (p *Pool) detectAlerts(ctx context.Context, crawlingID primitive.ObjectID) {
+	logger := log.With().Str("crawling_id", crawlingID.Hex()).Logger()
+
+	crawling, err := p.repo.GetCrawling(ctx, crawlingID)
+	if err != nil {
+		logger.Error().Err(err).Msg("alert detection: could not read the finished crawl")
+		return
+	}
+
+	previous, err := p.repo.PreviousCompletedCrawling(ctx, crawling.SiteID, crawlingID)
+	if err != nil {
+		logger.Error().Err(err).Msg("alert detection: could not find the previous round")
+		return
+	}
+	if previous == nil {
+		// First completed round for this site. Nothing to compare against, and
+		// announcing everything wrong with a newly added site is the burst
+		// MaxAlertsPerRound exists to prevent.
+		logger.Debug().Msg("alert detection: first completed round, nothing to compare")
+		return
+	}
+
+	current, err := p.repo.SummariseRound(ctx, crawlingID)
+	if err != nil || current == nil {
+		logger.Error().Err(err).Msg("alert detection: could not summarise the finished round")
+		return
+	}
+
+	prior, err := p.repo.SummariseRound(ctx, previous.ID)
+	if err != nil || prior == nil {
+		logger.Error().Err(err).Msg("alert detection: could not summarise the previous round")
+		return
+	}
+
+	alerts := models.DetectAlerts(prior, current)
+	if len(alerts) == 0 {
+		logger.Debug().Msg("alert detection: nothing changed")
+		return
+	}
+
+	if err := p.repo.SaveAlerts(ctx, crawling.SiteID, crawlingID, alerts); err != nil {
+		logger.Error().Err(err).Msg("alert detection: could not store alerts")
+		return
+	}
+
+	logger.Info().Int("alerts", len(alerts)).Msg("alert detection: stored alerts for this round")
 }
 
 // recoveryLoop periodically requeues stale processing tasks and retry tasks.

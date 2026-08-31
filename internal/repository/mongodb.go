@@ -134,6 +134,17 @@ func (r *MongoRepository) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "crawling_id", Value: 1}}},
 		{Keys: bson.D{{Key: "failed_at", Value: -1}}},
 	})
+	if err != nil {
+		return err
+	}
+
+	// alert_events indexes. Listing a site's alerts and replacing one round's
+	// alerts are the only two access patterns, and both are on the hot path of
+	// finishing a crawl.
+	_, err = r.alertEvents().Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "site_id", Value: 1}, {Key: "created_at", Value: -1}}},
+		{Keys: bson.D{{Key: "crawling_id", Value: 1}}},
+	})
 
 	return err
 }
