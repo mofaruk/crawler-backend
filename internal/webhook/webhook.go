@@ -28,6 +28,11 @@ const (
 	EventCrawlCompleted EventType = "crawl.completed"
 	EventCrawlFailed    EventType = "crawl.failed"
 	EventCrawlProgress  EventType = "crawl.progress"
+
+	// EventAlerts carries what changed on a site since the previous round —
+	// the same findings the alert email describes, for customers who would
+	// rather route them into their own systems than read mail.
+	EventAlerts EventType = "site.alerts"
 )
 
 type WebhookPayload struct {

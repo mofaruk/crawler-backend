@@ -132,6 +132,7 @@ func main() {
 	// found, and let the dashboard mark one dealt with.
 	router.POST("/alerts/delivery", handler.AlertsForDelivery)
 	router.POST("/alerts/:id/dismiss", handler.DismissAlert)
+	router.POST("/alerts/webhook", handler.SendAlertWebhook)
 
 	// --- Metrics Server ---
 	metricsSrv := &http.Server{

@@ -10,6 +10,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
+	"github.com/webkonsulenterne/crawler-backend/internal/source"
+	"github.com/webkonsulenterne/crawler-backend/internal/webhook"
 )
 
 // GET /sites/:id/alerts?days=&from=&to=&limit=&include_dismissed=
@@ -138,4 +140,68 @@ func (h *Handler) AlertsForDelivery(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": alerts, "total": len(alerts)})
+}
+
+// POST /alerts/webhook
+//
+// Deliver a site's alerts to a customer-supplied endpoint, signed so the
+// receiver can verify the request came from us.
+//
+// Sending lives here rather than in the dashboard because the dispatcher —
+// with its HMAC signing, retries and backoff — already does, and a second
+// implementation would be a second place for the signature to be wrong.
+func (h *Handler) SendAlertWebhook(c *gin.Context) {
+	var req struct {
+		WebhookURL string                   `json:"webhook_url" binding:"required"`
+		Secret     string                   `json:"secret"`
+		SiteID     string                   `json:"site_id"`
+		SiteURL    string                   `json:"site_url"`
+		Alerts     []map[string]interface{} `json:"alerts" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error(), Code: "INVALID_REQUEST"})
+		return
+	}
+
+	// The URL comes from a customer, and we fetch it from inside the network.
+	// Without this the webhook field is an SSRF primitive pointed at whatever
+	// the crawler can reach — the same reason base_url is validated.
+	if err := source.ValidateTargetURL(req.WebhookURL, h.cfg.AllowPrivateTargets); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error: "webhook URL is not allowed: " + err.Error(),
+			Code:  "INVALID_TARGET",
+		})
+		return
+	}
+
+	if len(req.Alerts) == 0 {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "no alerts to send", Code: "INVALID_REQUEST"})
+		return
+	}
+
+	payload := webhook.WebhookPayload{
+		Event:     webhook.EventAlerts,
+		Timestamp: time.Now().UTC(),
+		Data: map[string]interface{}{
+			"site_id":  req.SiteID,
+			"site_url": req.SiteURL,
+			"count":    len(req.Alerts),
+			"alerts":   req.Alerts,
+		},
+	}
+
+	if err := h.webhooks.Send(c.Request.Context(), req.WebhookURL, req.Secret, payload); err != nil {
+		// The dispatcher has already retried with backoff, so this is a
+		// settled failure rather than a transient one. 502: the request was
+		// fine, the customer's endpoint is what did not work.
+		log.Warn().Err(err).Str("site_id", req.SiteID).Msg("alert webhook delivery failed")
+		c.JSON(http.StatusBadGateway, models.ErrorResponse{
+			Error: "webhook delivery failed: " + err.Error(),
+			Code:  "DELIVERY_FAILED",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"delivered": true, "count": len(req.Alerts)})
 }

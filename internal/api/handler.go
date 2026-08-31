@@ -27,6 +27,7 @@ import (
 	"github.com/webkonsulenterne/crawler-backend/internal/ratelimiter"
 	"github.com/webkonsulenterne/crawler-backend/internal/repository"
 	"github.com/webkonsulenterne/crawler-backend/internal/source"
+	"github.com/webkonsulenterne/crawler-backend/internal/webhook"
 )
 
 type Handler struct {
@@ -37,6 +38,7 @@ type Handler struct {
 	rateLimiter  *ratelimiter.DistributedRateLimiter
 	dedup        *dedup.Deduplicator
 	parser       *source.URLParser
+	webhooks     *webhook.Dispatcher
 }
 
 func NewHandler(
@@ -55,6 +57,7 @@ func NewHandler(
 		rateLimiter:  rl,
 		dedup:        dd,
 		parser:       source.NewURLParser(),
+		webhooks:     webhook.NewDispatcher(cfg),
 	}
 }
 
