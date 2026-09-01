@@ -4,18 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/webkonsulenterne/crawler-backend/internal/testsupport"
 )
 
 func testController(t *testing.T) (*Controller, string) {
 	t.Helper()
 
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6382"})
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		t.Skip("redis not available on 6382")
-	}
-
-	c := New(rdb)
+	c := New(testsupport.Redis(t))
 	id := "test-adaptive-" + t.Name()
 	t.Cleanup(func() { c.Cleanup(context.Background(), id) })
 

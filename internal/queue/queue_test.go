@@ -8,6 +8,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
+	"github.com/webkonsulenterne/crawler-backend/internal/testsupport"
 )
 
 // newTestQueue dials the Redis given by REDIS_ADDR (default localhost:6382,
@@ -16,13 +17,8 @@ import (
 func newTestQueue(t *testing.T) (*DistributedQueue, *redis.Client) {
 	t.Helper()
 
-	addr := "localhost:6382"
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		t.Skipf("redis unavailable at %s: %v", addr, err)
-	}
+	rdb := testsupport.Redis(t)
+
 	return NewDistributedQueue(rdb), rdb
 }
 

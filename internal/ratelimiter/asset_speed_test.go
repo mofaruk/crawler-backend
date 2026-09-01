@@ -6,17 +6,14 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/webkonsulenterne/crawler-backend/internal/testsupport"
 )
 
 func testRedis(t *testing.T) *redis.Client {
 	t.Helper()
 
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6382"})
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		t.Skip("redis not available on 6382")
-	}
-
-	return rdb
+	return testsupport.Redis(t)
 }
 
 // Assets have their own budget so images, which an origin serves from disk or

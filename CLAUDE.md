@@ -58,7 +58,17 @@ docker run --rm -v "$PWD":/app -w /app golang:1.23-alpine go build ./...
 docker run --rm --network host -v "$PWD":/app -w /app golang:1.23-alpine go test ./... -count=1
 ```
 
-Queue tests need Redis on `localhost:6382` and skip cleanly without it.
+Queue, rate-limiter and adaptive-speed tests need Redis on `localhost:6382`.
+They skip without it, so use host networking to actually run them:
+
+```
+docker run --rm --network host -e REQUIRE_REDIS=1 \
+  -v "$PWD":/app -w /app golang:1.23-alpine go test ./... -count=1
+```
+
+`REQUIRE_REDIS` turns a missing Redis from a skip into a failure. Set it in CI:
+without it those packages skip silently, and a skipped test looks exactly like
+a passing one.
 
 ## Conventions
 
