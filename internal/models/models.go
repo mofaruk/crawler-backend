@@ -61,6 +61,14 @@ type Site struct {
 	// pages are *still* cached, which is why it is opt-in per site.
 	SmartRecrawl bool `bson:"smart_recrawl" json:"smart_recrawl"`
 
+	// AdaptiveSpeedDisabled turns off automatic slowing when the site starts
+	// struggling.
+	//
+	// Stored inverted so the zero value means enabled: protecting a
+	// customer's origin is the safe default, and every site created before
+	// this field existed was already being protected.
+	AdaptiveSpeedDisabled bool `bson:"adaptive_speed_disabled,omitempty" json:"adaptive_speed_disabled,omitempty"`
+
 	// SmartRecrawlMaxAgeHours bounds how long a cached result may be reused
 	// before the URL is fetched again anyway.
 	//
@@ -451,6 +459,7 @@ type CreateSiteRequest struct {
 	// 0 means "use the default"; the model resolves it. Bounded to the
 	// offered windows so an unbounded value cannot be set through the API.
 	SmartRecrawlMaxAgeHours int    `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
+	AdaptiveSpeedDisabled   bool   `json:"adaptive_speed_disabled"`
 	AssetMode               string `json:"asset_mode"`
 }
 
@@ -463,7 +472,8 @@ type UpdateSiteRequest struct {
 	UserAgent     *string `json:"user_agent"`
 	ExtractData   *string `json:"extract_data"`
 	SmartRecrawl  *bool   `json:"smart_recrawl"`
-	SmartRecrawlMaxAgeHours *int `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
+	SmartRecrawlMaxAgeHours *int  `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
+	AdaptiveSpeedDisabled   *bool `json:"adaptive_speed_disabled"`
 	AssetMode     *string `json:"asset_mode" binding:"omitempty,oneof=none top_variants images all"`
 }
 

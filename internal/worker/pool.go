@@ -794,6 +794,14 @@ func (p *Pool) adjustSpeed(ctx context.Context, crawlingID string, responseMs in
 		return
 	}
 
+	// Opt-out, per site. A customer whose origin is comfortably provisioned
+	// may prefer the crawl to hold the rate they set rather than back off on
+	// a slow patch — but the default protects the origin, so a site that has
+	// never been configured is still protected.
+	if site, err := p.repo.GetSite(ctx, crawling.SiteID); err == nil && site != nil && site.AdaptiveSpeedDisabled {
+		return
+	}
+
 	current, err := p.rateLimiter.CurrentSpeed(ctx, crawlingID)
 	if err != nil || current <= 0 {
 		current = crawling.Speed
