@@ -938,6 +938,18 @@ func (h *Handler) PruneCrawlings(c *gin.Context) {
 		return
 	}
 
+	// Roll each expiring round up before its results are deleted: this is the
+	// last moment they exist, and six stored numbers keep the timeline alive
+	// where a couple of thousand result documents would not be kept at all.
+	//
+	// A failure here must not stop the prune — the database growing without
+	// bound is the worse outcome — but it is logged rather than swallowed,
+	// because a silent one loses history permanently.
+	rolled, err := h.repo.RollUpCrawlings(c.Request.Context(), siteID, before)
+	if err != nil {
+		log.Error().Err(err).Str("site_id", req.SiteID).Msg("failed to roll up timeline before pruning")
+	}
+
 	deleted, err := h.repo.PruneCrawlingsBefore(c.Request.Context(), siteID, before)
 	if err != nil {
 		log.Error().Err(err).Str("site_id", req.SiteID).Msg("failed to prune crawlings")
@@ -946,9 +958,10 @@ func (h *Handler) PruneCrawlings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"site_id":           req.SiteID,
-		"before":            before.UTC().Format(time.RFC3339),
-		"deleted_crawlings": deleted,
+		"site_id":            req.SiteID,
+		"before":             before.UTC().Format(time.RFC3339),
+		"deleted_crawlings":  deleted,
+		"rolled_up_to_timeline": rolled,
 	})
 }
 
@@ -1169,7 +1182,10 @@ func (h *Handler) GetSiteTimeline(c *gin.Context) {
 		}
 	}
 
-	points, err := h.repo.GetSiteTimeline(c.Request.Context(), siteID, since, limit)
+	// Merged: stored points for rounds whose results have been pruned, live
+	// ones for rounds that still have them. Reading only the live aggregation
+	// would make the graph end wherever retention did.
+	points, err := h.repo.MergedTimeline(c.Request.Context(), siteID, since, limit)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to build site timeline")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to build site timeline"})

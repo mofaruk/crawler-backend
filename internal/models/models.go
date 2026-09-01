@@ -746,13 +746,17 @@ func headerLookup(headers map[string]string, name string) string {
 // TimelinePoint is one crawl of a site, reduced to the handful of numbers
 // worth plotting against time.
 type TimelinePoint struct {
-	CrawlingID       string    `json:"crawling_id"`
-	CrawledAt        time.Time `json:"crawled_at"`
-	URLs             int       `json:"urls"`
-	CachePercent     float64   `json:"cache_percent"`
-	MedianAgeSeconds int64     `json:"median_age_seconds"`
-	AvgResponseMs    int64     `json:"avg_response_ms"`
-	Errors           int       `json:"errors"`
+	// SiteID is set only on a stored point; the aggregation that builds one
+	// from results already knows the site it was asked about.
+	SiteID primitive.ObjectID `bson:"site_id,omitempty" json:"-"`
+
+	CrawlingID       string    `bson:"crawling_id" json:"crawling_id"`
+	CrawledAt        time.Time `bson:"crawled_at" json:"crawled_at"`
+	URLs             int       `bson:"urls" json:"urls"`
+	CachePercent     float64   `bson:"cache_percent" json:"cache_percent"`
+	MedianAgeSeconds int64     `bson:"median_age_seconds" json:"median_age_seconds"`
+	AvgResponseMs    int64     `bson:"avg_response_ms" json:"avg_response_ms"`
+	Errors           int       `bson:"errors" json:"errors"`
 }
 
 // Stale-cache thresholds.

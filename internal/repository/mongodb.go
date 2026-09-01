@@ -138,6 +138,17 @@ func (r *MongoRepository) ensureIndexes(ctx context.Context) error {
 		return err
 	}
 
+	// site_timeline indexes. One point per round, read by site and plotted in
+	// time order; the unique crawling_id is what makes a repeated roll-up
+	// replace rather than duplicate.
+	_, err = r.siteTimeline().Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "site_id", Value: 1}, {Key: "crawled_at", Value: 1}}},
+		{Keys: bson.D{{Key: "crawling_id", Value: 1}}, Options: options.Index().SetUnique(true)},
+	})
+	if err != nil {
+		return err
+	}
+
 	// alert_events indexes. Listing a site's alerts and replacing one round's
 	// alerts are the only two access patterns, and both are on the hot path of
 	// finishing a crawl.
