@@ -84,6 +84,15 @@ type Site struct {
 	// skip-forever behaviour.
 	SmartRecrawlMaxAgeHours int `bson:"smart_recrawl_max_age_hours,omitempty" json:"smart_recrawl_max_age_hours,omitempty"`
 
+	// UncacheablePercentLimit stops a crawl once this share of pages turn out
+	// to be ones the CDN will never store. Past that point the round is
+	// spending the customer's quota to keep re-learning that their cache is
+	// switched off, so it finishes early and reports why.
+	//
+	// Zero or unset means DefaultUncacheablePercentLimit, not "no limit":
+	// existing sites predate the field and should get the protection.
+	UncacheablePercentLimit int `bson:"uncacheable_percent_limit,omitempty" json:"uncacheable_percent_limit,omitempty"`
+
 	// URLsBuiltAt is when the stored URL list was last rebuilt. Nil means no
 	// list has been built yet, so the next crawl derives one.
 	URLsBuiltAt *time.Time `bson:"urls_built_at,omitempty" json:"urls_built_at,omitempty"`
@@ -111,18 +120,21 @@ type Crawling struct {
 	// queries; an asset is usually served from disk or already at the CDN
 	// edge, so holding both to one rate made images crawl far slower than
 	// necessary. Zero means assets share the page budget.
-	AssetSpeed   int        `bson:"asset_speed" json:"asset_speed"`
-	ReloadSource bool       `bson:"reload_source" json:"reload_source"`
-	URLType      string     `bson:"url_type,omitempty" json:"url_type,omitempty"` // "all" | "static" | "dynamic"
-	TotalURLs    int        `bson:"total_urls" json:"total_urls"`
-	CrawledURLs  int        `bson:"crawled_urls" json:"crawled_urls"`
-	FailedURLs   int        `bson:"failed_urls" json:"failed_urls"`
-	StartedAt    *time.Time `bson:"started_at,omitempty" json:"started_at,omitempty"`
-	CompletedAt  *time.Time `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
-	PausedAt     *time.Time `bson:"paused_at,omitempty" json:"paused_at,omitempty"`
-	CreatedAt    time.Time  `bson:"created_at" json:"created_at"`
-	UpdatedAt    time.Time  `bson:"updated_at" json:"updated_at"`
-	ErrorMessage string     `bson:"error_message,omitempty" json:"error_message,omitempty"`
+	AssetSpeed   int    `bson:"asset_speed" json:"asset_speed"`
+	ReloadSource bool   `bson:"reload_source" json:"reload_source"`
+	URLType      string `bson:"url_type,omitempty" json:"url_type,omitempty"` // "all" | "static" | "dynamic"
+	TotalURLs    int    `bson:"total_urls" json:"total_urls"`
+	CrawledURLs  int    `bson:"crawled_urls" json:"crawled_urls"`
+	// StoppedReason explains a round that ended before it ran out of URLs, so
+	// the dashboard can say why rather than showing an unexplained short run.
+	StoppedReason string     `bson:"stopped_reason,omitempty" json:"stopped_reason,omitempty"`
+	FailedURLs    int        `bson:"failed_urls" json:"failed_urls"`
+	StartedAt     *time.Time `bson:"started_at,omitempty" json:"started_at,omitempty"`
+	CompletedAt   *time.Time `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	PausedAt      *time.Time `bson:"paused_at,omitempty" json:"paused_at,omitempty"`
+	CreatedAt     time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt     time.Time  `bson:"updated_at" json:"updated_at"`
+	ErrorMessage  string     `bson:"error_message,omitempty" json:"error_message,omitempty"`
 }
 
 // --- Crawl URL ---
@@ -170,6 +182,12 @@ type CrawlingResult struct {
 	// than fetched in this one, because smart recrawl skipped the URL. Without
 	// the flag a stale row is indistinguishable from a fresh one.
 	CarriedForward bool `bson:"carried_forward,omitempty" json:"carried_forward,omitempty"`
+	// CannotCache marks a page the origin forbids the CDN to store. Warming
+	// it can never succeed, so later rounds carry it forward instead of
+	// re-fetching it, and it is reported as an issue rather than counted as
+	// another cache miss. Persisted rather than recomputed because the
+	// carry-forward query has to filter on it.
+	CannotCache bool `bson:"cannot_cache,omitempty" json:"cannot_cache,omitempty"`
 	// OriginalCrawledAt is when the carried-forward result was actually
 	// fetched. CrawledAt stays the current round so ordering and windowing
 	// still work.
@@ -264,6 +282,30 @@ var SmartRecrawlMaxAgeChoices = []int{1, 2, 3, 6, 12, 24}
 // between daily crawls, short enough that a page falling out of cache is
 // caught within one crawl cycle rather than never.
 const SmartRecrawlDefaultMaxAgeHours = 24
+
+// DefaultUncacheablePercentLimit is the share of never-cacheable pages at which
+// a crawl gives up.
+//
+// A quarter is high enough that a shop's cart, checkout and account pages —
+// which correctly refuse caching — never trip it on their own, and low enough
+// to catch a site whose caching is off altogether before the whole quota is
+// spent proving it.
+const DefaultUncacheablePercentLimit = 25
+
+// UncacheableMinSample is how many pages must be measured before the limit is
+// applied. Without it a site whose first four URLs happen to be the cart would
+// abort at 100% before reaching anything cacheable.
+const UncacheableMinSample = 20
+
+// UncacheableLimit resolves a site's configured threshold, falling back to the
+// default for sites saved before the field existed.
+func (s *Site) UncacheableLimit() int {
+	if s.UncacheablePercentLimit <= 0 || s.UncacheablePercentLimit > 100 {
+		return DefaultUncacheablePercentLimit
+	}
+
+	return s.UncacheablePercentLimit
+}
 
 // SmartRecrawlMaxAge resolves a site's configured window, falling back to the
 // default and clamping anything out of range. Callers must use this rather
@@ -464,17 +506,17 @@ type CreateSiteRequest struct {
 }
 
 type UpdateSiteRequest struct {
-	Name          *string `json:"name"`
-	BaseURL       *string `json:"base_url"`
-	URLLimit      *int    `json:"url_limit" binding:"omitempty,min=1"`
-	URLSource     *string `json:"url_source" binding:"omitempty,url"`
-	URLSourceType *string `json:"url_source_type" binding:"omitempty,oneof=csv xml auto smart"`
-	UserAgent     *string `json:"user_agent"`
-	ExtractData   *string `json:"extract_data"`
-	SmartRecrawl  *bool   `json:"smart_recrawl"`
-	SmartRecrawlMaxAgeHours *int  `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
-	AdaptiveSpeedDisabled   *bool `json:"adaptive_speed_disabled"`
-	AssetMode     *string `json:"asset_mode" binding:"omitempty,oneof=none top_variants images all"`
+	Name                    *string `json:"name"`
+	BaseURL                 *string `json:"base_url"`
+	URLLimit                *int    `json:"url_limit" binding:"omitempty,min=1"`
+	URLSource               *string `json:"url_source" binding:"omitempty,url"`
+	URLSourceType           *string `json:"url_source_type" binding:"omitempty,oneof=csv xml auto smart"`
+	UserAgent               *string `json:"user_agent"`
+	ExtractData             *string `json:"extract_data"`
+	SmartRecrawl            *bool   `json:"smart_recrawl"`
+	SmartRecrawlMaxAgeHours *int    `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
+	AdaptiveSpeedDisabled   *bool   `json:"adaptive_speed_disabled"`
+	AssetMode               *string `json:"asset_mode" binding:"omitempty,oneof=none top_variants images all"`
 }
 
 type StartCrawlingRequest struct {
@@ -652,6 +694,17 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 			"The origin sends no Cache-Control header, so the CDN must guess", SeverityWarning)
 	}
 
+	// A page the origin forbids the CDN to store. Worth its own issue because
+	// it looks identical to a merely cold page in the results — both report
+	// MISS — but no amount of warming will ever change it. Measured on a real
+	// site: six consecutive fetches of a max-age=0 page, MISS every time, Age
+	// never present. A cacheable page turns HIT on the second fetch.
+	if s.StatusCode == 200 && cacheStatus != "" && !CanEverCache(s.Headers) {
+		add("cache_forbidden", "Origin forbids caching",
+			"The page tells the CDN not to store it, so it will never be cached",
+			SeverityWarning)
+	}
+
 	// --- Page quality (HTML only) ---
 	if p := s.Page; p != nil && s.StatusCode == 200 {
 		switch {
@@ -808,6 +861,48 @@ func cacheFreshness(headers map[string]string) (age, maxAge int, ok bool) {
 	}
 
 	return 0, 0, false
+}
+
+// CanEverCache reports whether a CDN is permitted to store this response at
+// all.
+//
+// The distinction matters for cost as much as for reporting: warming a page
+// the origin forbids caching burns a fetch against the customer's origin on
+// every round and can never succeed. Crawling still visits the page, so a
+// fixed policy is picked up on the next round, but the result is reported as
+// "cannot cache" rather than counted as another cache failure.
+//
+// no-store and no-cache are explicit refusals. max-age=0 is the one that
+// catches people out: it looks like a caching policy and is treated as one by
+// the settings screen, but it tells a shared cache the copy is stale the
+// instant it arrives. s-maxage is checked first — it targets shared caches
+// specifically, so "s-maxage=86400, max-age=0" is a correctly cached page with
+// a deliberately short browser lifetime, not a forbidden one.
+func CanEverCache(headers map[string]string) bool {
+	cc := strings.ToLower(strings.TrimSpace(headerLookup(headers, "Cache-Control")))
+	if cc == "" {
+		// No policy at all: the CDN decides for itself, and often does cache.
+		// no_cache_control already reports the ambiguity.
+		return true
+	}
+
+	if strings.Contains(cc, "no-store") || strings.Contains(cc, "private") {
+		return false
+	}
+
+	if v, found := cacheDirectiveSeconds(cc, "s-maxage"); found {
+		return v > 0
+	}
+
+	if strings.Contains(cc, "no-cache") {
+		return false
+	}
+
+	if v, found := cacheDirectiveSeconds(cc, "max-age"); found {
+		return v > 0
+	}
+
+	return true
 }
 
 // cacheDirectiveSeconds pulls one "name=seconds" directive out of a

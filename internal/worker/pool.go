@@ -381,6 +381,9 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 		ResponseTime: result.ResponseTime.Milliseconds(),
 		CrawledAt:    time.Now(),
 		RedirectedTo: result.RedirectedTo,
+		// Recorded at fetch time so the next round's carry-forward query can
+		// filter on it without re-reading and re-parsing every header.
+		CannotCache: result.StatusCode == 200 && !models.CanEverCache(result.Headers),
 	}
 
 	// Adjust the crawl rate from how the site is holding up.
@@ -451,6 +454,85 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 
 	// Update progress
 	_ = p.repo.UpdateCrawlingProgress(ctx, mustObjectID(crawlingID), 1, 0)
+
+	// Only pages count toward the limit. Assets have their own caching rules
+	// and a site can legitimately serve some uncacheable, so folding them in
+	// would trip the check on sites whose pages are perfectly fine.
+	if crawlingResult.CannotCache && !crawler.IsAssetURL(task.URL) {
+		p.checkUncacheableLimit(ctx, crawlingID, task.SiteID)
+	}
+}
+
+// checkUncacheableLimit ends a round early when too much of the site turns out
+// to be pages the CDN will never store.
+//
+// Past that point the crawl is spending the customer's quota, and hitting
+// their origin, to keep re-learning something already reported: the cache is
+// not doing its job here. The round finishes rather than fails — the results
+// gathered so far are real, and the reason is recorded so the dashboard can
+// explain the short round instead of showing an unexplained stop.
+//
+// Setting the state is all that is needed to stop the work: the dispatcher
+// only draws from the queue while the state is running, so nothing new is
+// handed out and the in-flight tasks finish normally.
+func (p *Pool) checkUncacheableLimit(ctx context.Context, crawlingID, siteID string) {
+	oid := mustObjectID(crawlingID)
+
+	crawling, err := p.repo.GetCrawling(ctx, oid)
+	if err != nil || crawling == nil {
+		return
+	}
+
+	// Already stopping, or the round is over: nothing to decide.
+	if crawling.Status != models.CrawlStatusRunning {
+		return
+	}
+
+	uncacheable, err := p.repo.CountUncacheablePages(ctx, oid)
+	if err != nil {
+		// Never fatal. Failing to check means the crawl runs to the end, which
+		// is the behaviour that existed before this check.
+		log.Warn().Err(err).Str("crawling_id", crawlingID).
+			Msg("uncacheable check failed; letting the crawl run on")
+
+		return
+	}
+
+	// A small sample says nothing. A shop whose first URLs happen to be the
+	// cart and checkout would otherwise abort at 100% before reaching a single
+	// product page.
+	if crawling.CrawledURLs < models.UncacheableMinSample {
+		return
+	}
+
+	site, err := p.repo.GetSite(ctx, mustObjectID(siteID))
+	if err != nil || site == nil {
+		return
+	}
+
+	limit := site.UncacheableLimit()
+	percent := uncacheable * 100 / crawling.CrawledURLs
+
+	if percent < limit {
+		return
+	}
+
+	log.Warn().
+		Str("crawling_id", crawlingID).
+		Int("uncacheable", uncacheable).
+		Int("crawled", crawling.CrawledURLs).
+		Int("percent", percent).
+		Int("limit", limit).
+		Msg("stopping crawl: too much of the site can never be cached")
+
+	_ = p.repo.SetCrawlingStoppedReason(ctx, oid, fmt.Sprintf(
+		"Stopped early: %d%% of the pages checked can never be cached, past the %d%% limit for this site. "+
+			"Warming them cannot succeed, so the round ended rather than spending the rest of the quota on them.",
+		percent, limit,
+	))
+
+	_ = p.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
+	_ = p.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
 }
 
 // recordAttemptFailure handles one failed fetch attempt: it reschedules the

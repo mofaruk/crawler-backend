@@ -379,6 +379,32 @@ func (r *MongoRepository) IncCrawlingTotalURLs(ctx context.Context, id primitive
 	return err
 }
 
+// CountUncacheablePages counts pages in a round the origin forbids the CDN to
+// store. Assets are excluded: they follow their own caching rules and are not
+// what the limit is about.
+func (r *MongoRepository) CountUncacheablePages(ctx context.Context, crawlingID primitive.ObjectID) (int, error) {
+	n, err := r.crawlingResults().CountDocuments(ctx, bson.M{
+		"crawling_id":  crawlingID,
+		"cannot_cache": true,
+		// Pages only. An asset row has no page signals, so this is the same
+		// distinction the rest of the reporting draws.
+		"page": bson.M{"$ne": nil},
+	})
+
+	return int(n), err
+}
+
+// SetCrawlingStoppedReason records why a round ended before it ran out of URLs,
+// so the dashboard can explain a short round rather than showing an
+// unexplained stop.
+func (r *MongoRepository) SetCrawlingStoppedReason(ctx context.Context, id primitive.ObjectID, reason string) error {
+	_, err := r.crawlings().UpdateByID(ctx, id, bson.M{
+		"$set": bson.M{"stopped_reason": reason},
+	})
+
+	return err
+}
+
 func (r *MongoRepository) SetCrawlingError(ctx context.Context, id primitive.ObjectID, errMsg string) error {
 	_, err := r.crawlings().UpdateByID(ctx, id, bson.M{
 		"$set": bson.M{
@@ -980,10 +1006,24 @@ func (r *MongoRepository) CachedResultsFromLastCrawl(
 	// resets to now.
 	cutoff := time.Now().Add(-maxAge)
 
+	// Two kinds of URL are worth carrying forward rather than re-fetching.
+	//
+	// A cached one, because that is the whole point of smart recrawl. And one
+	// the origin forbids caching, because warming it can never succeed: the
+	// page reports MISS on every round, so it would otherwise be re-fetched
+	// forever, spending the customer's quota and hitting their origin to learn
+	// something we already know. Those are marked cache_forbidden and reported
+	// as an issue instead.
+	//
+	// The bounded window still applies to both, so a fixed cache policy is
+	// picked up on the next round rather than staying skipped forever.
 	cursor, err := r.crawlingResults().Find(ctx, bson.M{
 		"crawling_id": last.ID,
-		"headers.CF-Cache-Status": bson.M{
-			"$in": bson.A{"HIT", "REVALIDATED", "UPDATING"},
+		"$or": bson.A{
+			bson.M{"headers.CF-Cache-Status": bson.M{
+				"$in": bson.A{"HIT", "REVALIDATED", "UPDATING"},
+			}},
+			bson.M{"cannot_cache": true},
 		},
 		"$expr": bson.M{
 			"$gte": bson.A{
