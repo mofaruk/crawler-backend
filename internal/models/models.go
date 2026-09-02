@@ -501,6 +501,7 @@ type CreateSiteRequest struct {
 	// 0 means "use the default"; the model resolves it. Bounded to the
 	// offered windows so an unbounded value cannot be set through the API.
 	SmartRecrawlMaxAgeHours int    `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
+	UncacheablePercentLimit int    `json:"uncacheable_percent_limit" binding:"omitempty,min=1,max=100"`
 	AdaptiveSpeedDisabled   bool   `json:"adaptive_speed_disabled"`
 	AssetMode               string `json:"asset_mode"`
 }
@@ -515,6 +516,7 @@ type UpdateSiteRequest struct {
 	ExtractData             *string `json:"extract_data"`
 	SmartRecrawl            *bool   `json:"smart_recrawl"`
 	SmartRecrawlMaxAgeHours *int    `json:"smart_recrawl_max_age_hours" binding:"omitempty,min=1,max=24"`
+	UncacheablePercentLimit *int    `json:"uncacheable_percent_limit" binding:"omitempty,min=1,max=100"`
 	AdaptiveSpeedDisabled   *bool   `json:"adaptive_speed_disabled"`
 	AssetMode               *string `json:"asset_mode" binding:"omitempty,oneof=none top_variants images all"`
 }

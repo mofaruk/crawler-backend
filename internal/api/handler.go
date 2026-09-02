@@ -133,6 +133,7 @@ func (h *Handler) CreateSite(c *gin.Context) {
 		// Zero is preserved rather than defaulted here: the model resolves it,
 		// so the default lives in one place and applies to old rows too.
 		SmartRecrawlMaxAgeHours: req.SmartRecrawlMaxAgeHours,
+		UncacheablePercentLimit: req.UncacheablePercentLimit,
 		AdaptiveSpeedDisabled:   req.AdaptiveSpeedDisabled,
 		AssetMode:               models.NormalizeAssetMode(req.AssetMode),
 	}
@@ -246,6 +247,9 @@ func (h *Handler) UpdateSite(c *gin.Context) {
 	}
 	if req.SmartRecrawlMaxAgeHours != nil {
 		update["smart_recrawl_max_age_hours"] = *req.SmartRecrawlMaxAgeHours
+	}
+	if req.UncacheablePercentLimit != nil {
+		update["uncacheable_percent_limit"] = *req.UncacheablePercentLimit
 	}
 	if req.AdaptiveSpeedDisabled != nil {
 		update["adaptive_speed_disabled"] = *req.AdaptiveSpeedDisabled
