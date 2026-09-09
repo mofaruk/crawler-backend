@@ -45,9 +45,9 @@ func TestNoAlertsOnFirstRound(t *testing.T) {
 // missed. Both sides of the boundary are pinned.
 func TestCacheRegressionThreshold(t *testing.T) {
 	cases := []struct {
-		name       string
-		prev, cur  float64
-		wantAlert  bool
+		name      string
+		prev, cur float64
+		wantAlert bool
 	}{
 		{"just under the threshold is silent", 90, 76, false},
 		{"exactly at the threshold is silent", 90, 75, false},

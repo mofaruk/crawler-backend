@@ -18,6 +18,9 @@ say why for decisions worth revisiting.
 
 ### Added
 
+- An issue about an asset now names a page that references it. A broken image
+  is fixed where it is referenced, not at its own address, and the report could
+  not previously say where that was.
 - Crawl results can be filtered by absence: `status_code_negate` and
   `value_negate` invert their matches, which is what "URLs not yet in the CDN
   cache that still return 200" requires. Negating a header value also matches

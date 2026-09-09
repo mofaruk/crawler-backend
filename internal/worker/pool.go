@@ -381,6 +381,7 @@ func (p *Pool) processTask(ctx context.Context, crawlingID string, task *models.
 		ResponseTime: result.ResponseTime.Milliseconds(),
 		CrawledAt:    time.Now(),
 		RedirectedTo: result.RedirectedTo,
+		FoundOn:      task.FoundOn,
 		// Recorded at fetch time so the next round's carry-forward query can
 		// filter on it without re-reading and re-parsing every header.
 		CannotCache: result.StatusCode == 200 && !models.CanEverCache(result.Headers),
@@ -825,6 +826,14 @@ func (p *Pool) queueAssets(ctx context.Context, crawlingID string, task *models.
 			ExtractData: task.ExtractData,
 			MaxRetries:  p.cfg.CrawlerMaxRetries,
 			EnqueuedAt:  time.Now().Unix(),
+			// The page this asset was referenced from. A broken image is
+			// fixed where it is referenced, not at its own address, and the
+			// report could not name that page without this.
+			//
+			// The first page wins: an asset in a header or footer appears on
+			// every page, and the dedup above means only the first occurrence
+			// is ever queued. One example is enough to find the template.
+			FoundOn: task.URL,
 		})
 	}
 
@@ -846,6 +855,7 @@ func (p *Pool) queueAssets(ctx context.Context, crawlingID string, task *models.
 				URL:     t.URL,
 				URLHash: t.URLHash,
 				Kind:    models.SiteURLKindAsset,
+				FoundOn: t.FoundOn,
 			})
 		}
 

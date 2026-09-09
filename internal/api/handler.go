@@ -2008,6 +2008,11 @@ func (h *Handler) useStoredURLList(
 			ExtractData: site.ExtractData,
 			MaxRetries:  h.cfg.CrawlerMaxRetries,
 			EnqueuedAt:  time.Now().Unix(),
+			// Carried from the stored list. Assets are queued from a page's
+			// references only on the round that discovers them; every round
+			// after replays this list instead, so without it the referrer
+			// would be known once and lost from then on.
+			FoundOn: su.FoundOn,
 		})
 	}
 

@@ -832,9 +832,13 @@ func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primi
 			"redirected_to": bson.M{"$first": "$redirected_to"},
 			"headers":       bson.M{"$first": "$headers"},
 			"page":          bson.M{"$first": "$page"},
-			"last_seen":     bson.M{"$first": "$crawled_at"},
-			"first_seen":    bson.M{"$last": "$crawled_at"},
-			"occurrences":   bson.M{"$sum": 1},
+			// Any page that referenced this URL. $last, so the first crawl to
+			// find it wins: an asset in a shared template is referenced from
+			// every page, and one example is what names the template.
+			"found_on":    bson.M{"$last": "$found_on"},
+			"last_seen":   bson.M{"$first": "$crawled_at"},
+			"first_seen":  bson.M{"$last": "$crawled_at"},
+			"occurrences": bson.M{"$sum": 1},
 			// How many of this URL's crawls the CDN bypassed. One bypass is
 			// normal — a cold URL, a purge, a request carrying a cookie — so
 			// the classifier needs the count to tell that from a page the CDN
@@ -868,6 +872,7 @@ func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primi
 			"last_seen":     1,
 			"occurrences":   1,
 			"bypasses":      1,
+			"found_on":      1,
 		}}},
 	}
 

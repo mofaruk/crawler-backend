@@ -643,9 +643,9 @@ func TestOneURLCanProduceManyIssues(t *testing.T) {
 		// Cache-Control is present but empty: collected, and the origin sent
 		// none. Omitting the key would mean "not extracted", which is not a
 		// finding about the origin at all.
-		Headers:      map[string]string{"CF-Cache-Status": "BYPASS", "Cache-Control": ""},
-		Bypasses:     3,
-		FirstSeen:    first, LastSeen: last, Occurrences: 3,
+		Headers:   map[string]string{"CF-Cache-Status": "BYPASS", "Cache-Control": ""},
+		Bypasses:  3,
+		FirstSeen: first, LastSeen: last, Occurrences: 3,
 		Page: &PageSignals{
 			Title: "", TitleLength: 0, MetaDescription: "", Canonical: "",
 			NoIndex: true, H1Count: 0, WordCount: 12,

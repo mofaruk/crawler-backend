@@ -178,6 +178,9 @@ type CrawlingResult struct {
 	RedirectedTo string `bson:"redirected_to,omitempty" json:"redirected_to,omitempty"`
 	// Page holds on-page signals parsed from an HTML body; nil for assets.
 	Page *PageSignals `bson:"page,omitempty" json:"page,omitempty"`
+	// FoundOn is the page that referenced this URL. Set for assets, empty for
+	// URLs the source listed directly.
+	FoundOn string `bson:"found_on,omitempty" json:"found_on,omitempty"`
 	// CarriedForward marks a result copied from the previous round rather
 	// than fetched in this one, because smart recrawl skipped the URL. Without
 	// the flag a stale row is indistinguishable from a fresh one.
@@ -235,6 +238,15 @@ type CrawlTask struct {
 	Retries     int      `json:"retries"`
 	MaxRetries  int      `json:"max_retries"`
 	EnqueuedAt  int64    `json:"enqueued_at"`
+
+	// FoundOn is the page that referenced this URL, set when a page's assets
+	// are queued. Empty for URLs a source listed directly — those were not
+	// found anywhere, they *are* the list.
+	//
+	// Without it a broken image is a URL with no context: the fix is on the
+	// page referencing it, and that page was exactly what the report could not
+	// name.
+	FoundOn string `json:"found_on,omitempty"`
 }
 
 // SiteURL is one URL known to belong to a site, kept between crawls.
@@ -252,6 +264,12 @@ type SiteURL struct {
 	// Kind separates the pages a source listed from the assets those pages
 	// reference, so a report can say how much of a crawl is each.
 	Kind string `bson:"kind" json:"kind"` // "page" | "asset"
+
+	// FoundOn is the page this asset was referenced from, kept with the URL so
+	// it survives into later rounds. The list exists precisely so pages are not
+	// re-parsed every crawl, which means a referrer discovered once has to be
+	// stored or it is lost for every round after the first.
+	FoundOn string `bson:"found_on,omitempty" json:"found_on,omitempty"`
 
 	FirstSeenAt time.Time `bson:"first_seen_at" json:"first_seen_at"`
 	LastSeenAt  time.Time `bson:"last_seen_at" json:"last_seen_at"`
@@ -577,6 +595,8 @@ type URLState struct {
 	// Bypasses is how many of this URL's crawls the CDN bypassed, which is a
 	// different question from how many times it was crawled.
 	Bypasses int `bson:"bypasses"`
+	// FoundOn is a page that referenced this URL, for issues about assets.
+	FoundOn string `bson:"found_on"`
 }
 
 // Severity orders issues for display. Higher is worse.
@@ -592,6 +612,9 @@ const (
 type SiteIssue struct {
 	URL  string `json:"url"`
 	Kind string `json:"kind"`
+	// FoundOn is a page referencing this URL, where one is known. A broken
+	// image is fixed on the page that references it, not at its own address.
+	FoundOn string `json:"found_on,omitempty"`
 	// Category separates what this product is for from what it throws in.
 	// See IssueCategory.
 	Category    string    `json:"category"`
@@ -683,7 +706,7 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 
 	add := func(kind, title, detail string, severity int) {
 		out = append(out, SiteIssue{
-			URL: s.URL, Kind: kind, Category: IssueCategory(kind),
+			URL: s.URL, Kind: kind, Category: IssueCategory(kind), FoundOn: s.FoundOn,
 			Title: title, Detail: detail,
 			Severity: severity, StatusCode: s.StatusCode,
 			FirstSeen: s.FirstSeen, LastSeen: s.LastSeen, Occurrences: s.Occurrences,
