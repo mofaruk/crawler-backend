@@ -38,6 +38,10 @@ say why for decisions worth revisiting.
 
 ### Fixed
 
+- A broken image is no longer called a broken page. The title names what the
+  URL is — image, stylesheet, script, font, media file, PDF or page — because a
+  page referencing something no longer there and a route that no longer
+  resolves are different problems with different fixes.
 - Two accounts holding their own site record for the same domain could crawl it
   at once, doubling the request rate against the customer's origin. The guard
   now matches on the normalised host rather than the site id.

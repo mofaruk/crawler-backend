@@ -46,7 +46,9 @@ func TestAvailabilityIsMutuallyExclusive(t *testing.T) {
 		{"399 is still not an error status", 399, "", 0, ""},
 		{"400 is the first broken status", 400, "broken", SeverityCritical, "Returns HTTP 400"},
 		{"404 is the canonical broken page", 404, "broken", SeverityCritical, "Returns HTTP 404"},
-		{"410 outranks the generic 4xx branch", 410, "gone", SeverityWarning, "Returns HTTP 410"},
+		// The detail names what the URL is, so a 410ing image does not read as
+		// a missing page.
+		{"410 outranks the generic 4xx branch", 410, "gone", SeverityWarning, "This page returns HTTP 410"},
 		{"429 is broken, not gone", 429, "broken", SeverityCritical, "Returns HTTP 429"},
 		{"499 is the last broken status", 499, "broken", SeverityCritical, "Returns HTTP 499"},
 		{"500 is the first server error", 500, "server_error", SeverityCritical, "Returns HTTP 500"},

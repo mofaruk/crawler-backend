@@ -691,13 +691,21 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 	}
 
 	// --- Availability ---
+	//
+	// Named by what the URL actually is. A missing image and a missing page are
+	// different problems with different fixes — one is a page that references
+	// something no longer there, the other is a route that no longer resolves —
+	// and calling a 404ing .png a "broken page" sent people looking for the
+	// wrong thing.
+	noun := resourceNoun(s.ContentType, s.URL)
+
 	switch {
 	case s.StatusCode >= 500:
 		add("server_error", "Server error", fmt.Sprintf("Returns HTTP %d", s.StatusCode), SeverityCritical)
 	case s.StatusCode == 410:
-		add("gone", "Page permanently gone", "Returns HTTP 410", SeverityWarning)
+		add("gone", "Permanently gone", fmt.Sprintf("This %s returns HTTP 410", noun), SeverityWarning)
 	case s.StatusCode >= 400:
-		add("broken", "Broken page", fmt.Sprintf("Returns HTTP %d", s.StatusCode), SeverityCritical)
+		add("broken", "Broken "+noun, fmt.Sprintf("Returns HTTP %d", s.StatusCode), SeverityCritical)
 	case s.StatusCode == 0:
 		add("unreachable", "Could not be reached", "No response from the server", SeverityCritical)
 	}
@@ -879,6 +887,78 @@ func headerLookup(headers map[string]string, name string) string {
 		}
 	}
 	return ""
+}
+
+// resourceNoun names what a URL is, for issue titles.
+//
+// Content-Type first, since it is what the server said it served. A 404 has no
+// useful type — the body is an error page, usually text/html — so the URL's own
+// extension decides those, which is exactly the case that matters: a broken
+// image is only ever seen as a 404.
+func resourceNoun(contentType, rawURL string) string {
+	switch mediaKind(strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))) {
+	case "image":
+		return "image"
+	case "style":
+		return "stylesheet"
+	case "script":
+		return "script"
+	case "font":
+		return "font"
+	case "media":
+		return "media file"
+	}
+
+	return extensionNoun(rawURL)
+}
+
+// mediaKind buckets a MIME type into the kinds worth naming separately.
+func mediaKind(mime string) string {
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		return "image"
+	case mime == "text/css":
+		return "style"
+	case strings.Contains(mime, "javascript"), mime == "application/ecmascript":
+		return "script"
+	case strings.HasPrefix(mime, "font/"), strings.Contains(mime, "font-"):
+		return "font"
+	case strings.HasPrefix(mime, "video/"), strings.HasPrefix(mime, "audio/"):
+		return "media"
+	}
+
+	return ""
+}
+
+// extensionNoun falls back to the URL's extension, for responses whose type
+// says nothing — an error page served as HTML for a missing image, above all.
+func extensionNoun(rawURL string) string {
+	path := rawURL
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+
+	dot := strings.LastIndex(path, ".")
+	if dot < 0 || dot < strings.LastIndex(path, "/") {
+		return "page"
+	}
+
+	switch strings.ToLower(path[dot+1:]) {
+	case "jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "ico", "bmp", "tiff":
+		return "image"
+	case "css":
+		return "stylesheet"
+	case "js", "mjs":
+		return "script"
+	case "woff", "woff2", "ttf", "otf", "eot":
+		return "font"
+	case "mp4", "webm", "mov", "mp3", "wav", "ogg":
+		return "media file"
+	case "pdf":
+		return "PDF"
+	}
+
+	return "page"
 }
 
 // headerCollected reports whether the crawl looked for this header at all,
