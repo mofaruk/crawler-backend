@@ -27,3 +27,7 @@ mongo-data/
 # Local test fixtures (Screaming Frog exports, large CSVs) — served over HTTP
 # to the crawler during local development, not part of the build.
 /sample-data/
+
+# Client conversation exports (Telegram). Kept locally for context on what was
+# asked for and why; not ours to publish, and not part of the build.
+/chats/
