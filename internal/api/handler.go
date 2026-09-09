@@ -327,7 +327,11 @@ func (h *Handler) StartCrawling(c *gin.Context) {
 	// customer's origin, which can take their site down. Enforced here rather
 	// than only in the dashboard so any caller is covered, and returns the
 	// existing crawl so the UI can link to it instead of just refusing.
-	if active, err := h.repo.ActiveCrawlingForSite(c.Request.Context(), siteID); err != nil {
+	//
+	// Matched by domain, not site id: two accounts can each hold their own
+	// site document for the same base_url, and a per-site check would let both
+	// of them crawl it at once — the very thing this prevents.
+	if active, err := h.repo.ActiveCrawlingForBaseURL(c.Request.Context(), site.BaseURL); err != nil {
 		log.Error().Err(err).Msg("failed to check for an active crawling")
 	} else if active != nil {
 		c.JSON(http.StatusConflict, gin.H{
@@ -1135,7 +1139,7 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 		}
 	}
 
-	issues, err := h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, limit)
+	issues, total, err := h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, limit)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get site issues")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site issues"})
@@ -1143,7 +1147,10 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 	}
 
 	// Counts by kind, so the UI can headline "3 broken links" without
-	// re-deriving it from the list.
+	// re-deriving it from the list. Counted over the returned page: the
+	// repository already truncated to `limit`, so a caller that asked for a
+	// page gets that page's breakdown, while `total` below stays the site's
+	// real issue count.
 	byKind := map[string]int{}
 	for _, i := range issues {
 		byKind[i.Kind]++
@@ -1154,7 +1161,10 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 		"days":    days,
 		"since":   since,
 		"until":   until,
-		"total":   len(issues),
+		// The site's issue count, not len(data): the dashboard asks for
+		// limit=1 to render a badge, and reporting the page size capped
+		// every badge at 1.
+		"total":   total,
 		"by_kind": byKind,
 		"data":    issues,
 	})

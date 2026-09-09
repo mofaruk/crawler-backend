@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -124,6 +125,12 @@ func (r *MongoRepository) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "crawling_id", Value: 1}, {Key: "_id", Value: -1}}},
 		{Keys: bson.D{{Key: "site_id", Value: 1}}},
 		{Keys: bson.D{{Key: "crawled_at", Value: -1}}},
+		// Covers the site-issues aggregation, which matches on site_id *and* a
+		// crawled_at window. With only the single-field indexes above Mongo
+		// picks crawled_at and then fetches every document in the window to
+		// test site_id: 7,832 documents examined to return none on a small
+		// local dataset, seconds of it in production.
+		{Keys: bson.D{{Key: "site_id", Value: 1}, {Key: "crawled_at", Value: -1}}},
 	})
 	if err != nil {
 		return err
@@ -271,17 +278,66 @@ func (r *MongoRepository) CreateCrawling(ctx context.Context, crawling *models.C
 // server — two rounds at 14,400/hr is 28,800/hr arriving at an origin that
 // was sized for one. Callers use this to refuse the second start.
 func (r *MongoRepository) ActiveCrawlingForSite(ctx context.Context, siteID primitive.ObjectID) (*models.Crawling, error) {
+	return r.activeCrawlingMatching(ctx, bson.M{"site_id": siteID})
+}
+
+// ActiveCrawlingForBaseURL is ActiveCrawlingForSite across every site document
+// sharing a domain.
+//
+// Two accounts may each hold their own site document for the same base_url, so
+// a per-site check lets both crawl at once — exactly the case it exists to
+// prevent, and the one that doubles the request rate against a customer's
+// origin. Sites are matched on the normalised host so http/https, a trailing
+// slash or a www. prefix cannot be used to sidestep it.
+func (r *MongoRepository) ActiveCrawlingForBaseURL(ctx context.Context, baseURL string) (*models.Crawling, error) {
+	host := NormalizeHost(baseURL)
+	if host == "" {
+		return nil, nil
+	}
+
+	// The stored base_url is not normalised, so the candidates are gathered by
+	// host and filtered here rather than matched in the query.
+	cursor, err := r.sites().Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"_id": 1, "base_url": 1}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var siteIDs []primitive.ObjectID
+	for cursor.Next(ctx) {
+		var site struct {
+			ID      primitive.ObjectID `bson:"_id"`
+			BaseURL string             `bson:"base_url"`
+		}
+		if err := cursor.Decode(&site); err != nil {
+			continue
+		}
+		if NormalizeHost(site.BaseURL) == host {
+			siteIDs = append(siteIDs, site.ID)
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	if len(siteIDs) == 0 {
+		return nil, nil
+	}
+
+	return r.activeCrawlingMatching(ctx, bson.M{"site_id": bson.M{"$in": siteIDs}})
+}
+
+// activeCrawlingMatching returns the first unfinished round matching filter.
+func (r *MongoRepository) activeCrawlingMatching(ctx context.Context, filter bson.M) (*models.Crawling, error) {
 	var crawling models.Crawling
 
-	err := r.crawlings().FindOne(ctx, bson.M{
-		"site_id": siteID,
-		"status": bson.M{"$in": bson.A{
-			models.CrawlStatusPending,
-			models.CrawlStatusDiscovering,
-			models.CrawlStatusRunning,
-			models.CrawlStatusPaused,
-		}},
-	}).Decode(&crawling)
+	filter["status"] = bson.M{"$in": bson.A{
+		models.CrawlStatusPending,
+		models.CrawlStatusDiscovering,
+		models.CrawlStatusRunning,
+		models.CrawlStatusPaused,
+	}}
+
+	err := r.crawlings().FindOne(ctx, filter).Decode(&crawling)
 
 	if err == mongo.ErrNoDocuments {
 		return nil, nil
@@ -291,6 +347,29 @@ func (r *MongoRepository) ActiveCrawlingForSite(ctx context.Context, siteID prim
 	}
 
 	return &crawling, nil
+}
+
+// NormalizeHost reduces a base URL to the host it addresses, so two spellings
+// of the same site compare equal: scheme, port, path, a leading www. and case
+// are all dropped. Mirrors the dashboard's UserSite::normalizeBaseUrl.
+func NormalizeHost(rawURL string) string {
+	s := strings.TrimSpace(strings.ToLower(rawURL))
+	if s == "" {
+		return ""
+	}
+
+	// url.Parse needs a scheme to treat the first segment as a host rather
+	// than a path, and callers may store a bare domain.
+	if !strings.Contains(s, "://") {
+		s = "https://" + s
+	}
+
+	parsed, err := url.Parse(s)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimPrefix(parsed.Hostname(), "www.")
 }
 
 func (r *MongoRepository) GetCrawling(ctx context.Context, id primitive.ObjectID) (*models.Crawling, error) {
@@ -692,13 +771,13 @@ func (r *MongoRepository) GetSiteTimeline(ctx context.Context, siteID primitive.
 //
 // Detection is deliberately broad — every signal here is already stored, so
 // reporting it costs one aggregation rather than another crawl.
-func (r *MongoRepository) GetSiteIssues(ctx context.Context, siteID primitive.ObjectID, since time.Time, limit int64) ([]models.SiteIssue, error) {
+func (r *MongoRepository) GetSiteIssues(ctx context.Context, siteID primitive.ObjectID, since time.Time, limit int64) ([]models.SiteIssue, int, error) {
 	return r.GetSiteIssuesBetween(ctx, siteID, since, time.Now().UTC(), limit)
 }
 
 // GetSiteIssuesBetween is GetSiteIssues over an explicit window, so callers
 // can ask about a specific date or range rather than only "the last N days".
-func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primitive.ObjectID, since, until time.Time, limit int64) ([]models.SiteIssue, error) {
+func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primitive.ObjectID, since, until time.Time, limit int64) ([]models.SiteIssue, int, error) {
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{
 			"site_id":    siteID,
@@ -736,13 +815,13 @@ func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primi
 
 	cursor, err := r.crawlingResults().Aggregate(ctx, pipeline)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer cursor.Close(ctx)
 
 	var rows []models.URLState
 	if err := cursor.All(ctx, &rows); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Duplicate titles can only be found across the whole set, so count them
@@ -767,10 +846,15 @@ func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primi
 		return issues[i].Occurrences > issues[j].Occurrences
 	})
 
+	// The caller needs how many issues the site has, not how many it asked to
+	// see: the dashboard requests limit=1 purely to render a count badge, and
+	// reporting len(issues) after truncation capped every badge at 1.
+	total := len(issues)
+
 	if int64(len(issues)) > limit {
 		issues = issues[:limit]
 	}
-	return issues, nil
+	return issues, total, nil
 }
 
 func (r *MongoRepository) GetCrawlingResults(ctx context.Context, crawlingID primitive.ObjectID, filter bson.M, skip, limit int64) ([]models.CrawlingResult, int64, error) {
