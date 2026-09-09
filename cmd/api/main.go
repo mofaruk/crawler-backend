@@ -78,6 +78,11 @@ func main() {
 	defer stopRecovery()
 	handler.StartOrphanRecovery(recoveryCtx)
 
+	// Verify outbound links on a timer. Before this the checker ran only when
+	// someone opened a site's Links tab and pressed the button, so a report
+	// was as old as the last person who thought to refresh it.
+	handler.StartLinkCheckScheduler(recoveryCtx)
+
 	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()

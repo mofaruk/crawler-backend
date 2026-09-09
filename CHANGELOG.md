@@ -18,6 +18,17 @@ say why for decisions worth revisiting.
 
 ### Added
 
+- Links that refused the check are reported as blocked rather than dropped.
+  Excluding them from the broken list was right — LinkedIn and sites behind bot
+  protection answer that way to anything automated — but saying nothing left a
+  report reading "no broken links" when a dozen had never been answered at all.
+  `/sites/:id/links/broken` now returns them alongside, and the site's Links tab
+  lists them under "Blocked — not checked".
+- Outbound links are verified on a schedule. Nothing ran the checker before:
+  it fired only when someone opened a site's Links tab and pressed the button,
+  so a report was as old as the last person who thought to refresh it —
+  dearbaby.dk sat with a thousand links that had never been checked at all. A
+  bounded batch per site every ten minutes, nothing re-checked inside a week.
 - An issue about an asset now names a page that references it. A broken image
   is fixed where it is referenced, not at its own address, and the report could
   not previously say where that was.

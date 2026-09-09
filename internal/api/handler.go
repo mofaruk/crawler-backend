@@ -1908,7 +1908,24 @@ func (h *Handler) GetBrokenLinks(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": links, "count": len(links)})
+	// Returned alongside rather than behind a second route: a report showing
+	// broken links without saying which were never checked is the thing being
+	// fixed here, and one call means the two cannot disagree about the state
+	// of the same crawl.
+	blocked, err := h.repo.BlockedOutboundLinks(c.Request.Context(), siteID, limit)
+	if err != nil {
+		// Not fatal. The broken list is the answer to the question asked; the
+		// blocked list is context, and losing it should not lose both.
+		log.Warn().Err(err).Msg("failed to list blocked links")
+		blocked = nil
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":          links,
+		"count":         len(links),
+		"blocked":       blocked,
+		"blocked_count": len(blocked),
+	})
 }
 
 // resolveSmartSource locates the sitemap a smart-source site should crawl.

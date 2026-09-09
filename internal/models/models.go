@@ -504,6 +504,25 @@ func (l OutboundLink) Broken() bool {
 	return l.StatusCode >= 400
 }
 
+// Blocked reports whether the last check was refused rather than answered.
+//
+// The destination is almost certainly fine: it declined to talk to a crawler.
+// LinkedIn answers 999 to anything but a signed-in browser, and bot protection
+// on ordinary sites invents 4xx codes no standard defines — a Danish host
+// answers 454 to a request whose user agent looks like a browser and 455 to
+// one carrying none at all.
+//
+// Reported separately rather than dropped. Excluding these from the broken
+// list was right, but saying nothing left the customer reading "1 broken"
+// with no hint that eight more were never checked at all.
+func (l OutboundLink) Blocked() bool {
+	if l.CheckedAt == nil || l.Error != "" {
+		return false
+	}
+
+	return linkcheck.BotBlocked(l.StatusCode)
+}
+
 // --- API Request/Response DTOs ---
 
 type CreateSiteRequest struct {

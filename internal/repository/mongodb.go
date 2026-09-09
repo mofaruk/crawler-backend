@@ -1495,6 +1495,50 @@ func (r *MongoRepository) BrokenOutboundLinks(
 	return links, nil
 }
 
+// BlockedOutboundLinks returns a site's destinations that refused the check.
+//
+// The mirror of BrokenOutboundLinks, and deliberately a separate query rather
+// than a flag on that one: the two answer different questions, and a customer
+// acting on them does different things — a broken link gets fixed or removed,
+// a blocked one gets opened in a browser and left alone.
+func (r *MongoRepository) BlockedOutboundLinks(
+	ctx context.Context,
+	siteID primitive.ObjectID,
+	limit int64,
+) ([]models.OutboundLink, error) {
+	blocked := make(bson.A, 0, len(linkcheck.NotBrokenStatuses()))
+	for _, status := range linkcheck.NotBrokenStatuses() {
+		blocked = append(blocked, status)
+	}
+
+	// A transport error is not a block: nothing answered at all, so there was
+	// no refusal to read. Those belong in the broken list.
+	filter := bson.M{
+		"site_id":     siteID,
+		"checked_at":  bson.M{"$ne": nil},
+		"error":       bson.M{"$in": bson.A{"", nil}},
+		"status_code": bson.M{"$in": blocked},
+	}
+
+	opts := options.Find().
+		SetLimit(limit).
+		SetSort(bson.D{{Key: "url", Value: 1}}).
+		SetProjection(bson.M{"found_on": bson.M{"$slice": 20}})
+
+	cur, err := r.outboundLinks().Find(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var links []models.OutboundLink
+	if err := cur.All(ctx, &links); err != nil {
+		return nil, err
+	}
+
+	return links, nil
+}
+
 func (r *MongoRepository) siteURLs() *mongo.Collection {
 	return r.db.Collection("site_urls")
 }
