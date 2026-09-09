@@ -1582,7 +1582,11 @@ func parsePagination(c *gin.Context) (int64, int64) {
 // `to` is inclusive of the whole day, so from=to=today returns today.
 // Returns the resolved bounds plus the equivalent day count for display.
 func resolveWindow(c *gin.Context, defaultDays, maxDays int) (since, until time.Time, days int) {
-	now := time.Now().UTC()
+	// Truncated to the minute, not time.Now(): a rolling window that slides
+	// every nanosecond gives two identical requests different bounds, so
+	// anything keyed on the window — the site-issues cache above all — never
+	// sees the same key twice and recomputes on every call.
+	now := time.Now().UTC().Truncate(time.Minute)
 	until = now
 
 	fromRaw := strings.TrimSpace(c.Query("from"))

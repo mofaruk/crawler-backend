@@ -263,7 +263,9 @@ func TestResolveWindowIgnoresUnparseableFrom(t *testing.T) {
 	if since.Year() < 2000 {
 		t.Fatalf("since = %v — an unparseable from must not yield the zero time", since)
 	}
-	if until.Before(before) {
+	// A minute of slack: the rolling window is truncated to the minute so that
+	// two identical requests produce the same bounds and can share a cache.
+	if until.Before(before.Add(-time.Minute)) {
 		t.Fatalf("until = %v, want approximately now", until)
 	}
 	// The window must span exactly the requested number of days.
@@ -554,5 +556,19 @@ func TestBuildResultsFilterCombinesClauses(t *testing.T) {
 	}
 	if len(got) != 4 {
 		t.Fatalf("expected exactly 4 clauses, got %d: %v", len(got), got)
+	}
+}
+
+// The site-issues cache is keyed on the resolved window, so two identical
+// requests a moment apart must resolve to the same bounds. Anchored to
+// time.Now() they never did, and every call recomputed a classification that
+// takes seconds on a large site.
+func TestResolveWindowIsStableAcrossCalls(t *testing.T) {
+	since1, until1, _ := resolveWindow(ctxWithQuery(t, "days=7"), 30, 365)
+	since2, until2, _ := resolveWindow(ctxWithQuery(t, "days=7"), 30, 365)
+
+	if !since1.Equal(since2) || !until1.Equal(until2) {
+		t.Fatalf("window moved between identical calls: (%v, %v) then (%v, %v)",
+			since1, until1, since2, until2)
 	}
 }
