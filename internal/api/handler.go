@@ -1401,12 +1401,29 @@ func (h *Handler) ExportCrawledURLs(c *gin.Context) {
 
 // buildResultsFilter assembles the MongoDB filter for the URL list / export
 // endpoints from the request query string. Caller supplies crawling_id.
+// isTrue reads a query flag the way a browser sends one: "1", "true" and "on"
+// all mean set, anything else — including absent — means not.
+func isTrue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+
+	return false
+}
+
 func buildResultsFilter(c *gin.Context) bson.M {
 	filter := bson.M{}
 
 	if statusCode := c.Query("status_code"); statusCode != "" {
 		if code, err := strconv.Atoi(statusCode); err == nil {
-			filter["status_code"] = code
+			// status_code_negate asks for everything *but* this code, which is
+			// how "what did not return 200" is expressed.
+			if isTrue(c.Query("status_code_negate")) {
+				filter["status_code"] = bson.M{"$ne": code}
+			} else {
+				filter["status_code"] = code
+			}
 		}
 	}
 
@@ -1433,7 +1450,7 @@ func buildResultsFilter(c *gin.Context) bson.M {
 			}})
 		}
 
-		filter["$expr"] = bson.M{
+		matches := bson.M{
 			"$anyElementTrue": bson.A{
 				bson.M{"$map": bson.M{
 					"input": bson.M{"$objectToArray": bson.M{"$ifNull": bson.A{"$headers", bson.M{}}}},
@@ -1441,6 +1458,16 @@ func buildResultsFilter(c *gin.Context) bson.M {
 					"in":    bson.M{"$and": conds},
 				}},
 			},
+		}
+
+		// value_negate inverts the whole match, so "cf-cache-status is not
+		// HIT" also returns URLs carrying no such header at all — a page the
+		// CDN never saw is exactly one that is not in its cache, and dropping
+		// those would hide the URLs most worth warming.
+		if isTrue(c.Query("value_negate")) {
+			filter["$expr"] = bson.M{"$not": matches}
+		} else {
+			filter["$expr"] = matches
 		}
 	}
 
