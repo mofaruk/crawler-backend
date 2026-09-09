@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
+	"github.com/webkonsulenterne/crawler-backend/internal/crawler"
 	"github.com/webkonsulenterne/crawler-backend/internal/linkcheck"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
 )
@@ -1537,6 +1538,49 @@ func (r *MongoRepository) BlockedOutboundLinks(
 	}
 
 	return links, nil
+}
+
+// PurgeShareLinks deletes stored outbound links that are social share buttons.
+//
+// The crawler stopped collecting these, but rows recorded before that change
+// stay until something removes them, and they are the bulk of what the blocked
+// list shows — 173 of nlphuset.dk's 194. Deleted rather than hidden: they are
+// not links, so there is nothing to keep.
+//
+// Returns how many were removed.
+func (r *MongoRepository) PurgeShareLinks(ctx context.Context) (int64, error) {
+	// The host list lives in the crawler package, which owns the definition.
+	// Matched as a suffix on the host portion of the URL so a subdomain shim
+	// like l.facebook.com is covered, and paired with the query and path marks
+	// that distinguish a share endpoint from an ordinary link to the same site.
+	patterns := make(bson.A, 0)
+	for _, host := range crawler.ShareHosts() {
+		quoted := regexp.QuoteMeta(host)
+		patterns = append(patterns, bson.M{"url": bson.M{
+			"$regex": `^https?://([^/]*\.)?` + quoted + `/`,
+		}})
+	}
+
+	if len(patterns) == 0 {
+		return 0, nil
+	}
+
+	marks := bson.A{}
+	for _, mark := range crawler.ShareMarks() {
+		marks = append(marks, bson.M{"url": bson.M{"$regex": regexp.QuoteMeta(mark)}})
+	}
+
+	res, err := r.outboundLinks().DeleteMany(ctx, bson.M{
+		"$and": bson.A{
+			bson.M{"$or": patterns},
+			bson.M{"$or": marks},
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return res.DeletedCount, nil
 }
 
 func (r *MongoRepository) siteURLs() *mongo.Collection {

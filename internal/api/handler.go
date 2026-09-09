@@ -1928,6 +1928,25 @@ func (h *Handler) GetBrokenLinks(c *gin.Context) {
 	})
 }
 
+// PurgeShareLinks removes stored share-button URLs from the outbound links.
+//
+// A maintenance route rather than a scheduled sweep: the crawler no longer
+// records these, so this is a one-off cleanup of rows written before that
+// change rather than something that needs to keep running.
+func (h *Handler) PurgeShareLinks(c *gin.Context) {
+	removed, err := h.repo.PurgeShareLinks(c.Request.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("failed to purge share links")
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to purge share links", Code: "INTERNAL"})
+
+		return
+	}
+
+	log.Info().Int64("removed", removed).Msg("purged share-button URLs from outbound links")
+
+	c.JSON(http.StatusOK, gin.H{"removed": removed})
+}
+
 // resolveSmartSource locates the sitemap a smart-source site should crawl.
 //
 // The result is not stored on the site: a customer who moves from Yoast to

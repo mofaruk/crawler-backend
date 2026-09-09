@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"sort"
 	"net/url"
 	"strings"
 )
@@ -214,4 +215,31 @@ func isShareHost(host string) bool {
 	}
 
 	return false
+}
+
+// ShareHosts exposes the share-service domains for callers that must express
+// the same rule elsewhere, such as a database query removing rows recorded
+// before the filter existed.
+func ShareHosts() []string {
+	hosts := make([]string, 0, len(shareHosts))
+	for host := range shareHosts {
+		hosts = append(hosts, host)
+	}
+
+	sort.Strings(hosts)
+
+	return hosts
+}
+
+// ShareMarks exposes the substrings that identify a share endpoint within one
+// of those hosts, so a query can tell a share button from an ordinary link.
+func ShareMarks() []string {
+	marks := append([]string{}, sharePaths...)
+	for _, param := range []string{"linkurl=", "url=", "u=", "text=", "link="} {
+		marks = append(marks, "?"+param, "&"+param)
+	}
+
+	sort.Strings(marks)
+
+	return marks
 }

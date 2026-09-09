@@ -116,6 +116,7 @@ func main() {
 	router.POST("/sites/:id/urls/refresh", handler.RefreshSiteURLList)
 	router.POST("/sites/:id/links/check", handler.CheckSiteLinks)
 	router.GET("/sites/:id/links/broken", handler.GetBrokenLinks)
+	router.POST("/links/purge-share", handler.PurgeShareLinks)
 	router.PUT("/sites/:id", handler.UpdateSite)
 	router.DELETE("/sites/:id", handler.DeleteSite)
 
