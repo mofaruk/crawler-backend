@@ -691,7 +691,13 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 		}
 	}
 
-	if s.StatusCode == 200 && headerLookup(s.Headers, "Cache-Control") == "" && cacheStatus != "" {
+	// Only when the crawl actually collected Cache-Control. A site whose
+	// extract_data omits it stores no value, and treating that as "the origin
+	// sends none" accused origins that do send one: dearbaby.dk was reported
+	// for every page while serving s-maxage=31536000, max-age=60, because the
+	// site was configured to extract only CF-Cache-Status and X-LiteSpeed-Cache.
+	if s.StatusCode == 200 && cacheStatus != "" && headerCollected(s.Headers, "Cache-Control") &&
+		headerLookup(s.Headers, "Cache-Control") == "" {
 		add("no_cache_control", "No caching policy",
 			"The origin sends no Cache-Control header, so the CDN must guess", SeverityWarning)
 	}
@@ -796,6 +802,28 @@ func headerLookup(headers map[string]string, name string) string {
 		}
 	}
 	return ""
+}
+
+// headerCollected reports whether the crawl looked for this header at all,
+// regardless of what the origin answered.
+//
+// A site only stores the headers its extract_data names, so a missing key means
+// "not asked for" while a present-but-empty one means "asked for, origin sent
+// none". Only the second is evidence about the origin.
+func headerCollected(headers map[string]string, name string) bool {
+	if headers == nil {
+		return false
+	}
+	if _, ok := headers[name]; ok {
+		return true
+	}
+	for k := range headers {
+		if strings.EqualFold(k, name) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // TimelinePoint is one crawl of a site, reduced to the handful of numbers

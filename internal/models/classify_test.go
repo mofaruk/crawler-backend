@@ -389,8 +389,22 @@ func TestNoCacheControlPreconditions(t *testing.T) {
 		want    bool
 	}{
 		{
-			"CDN present and no Cache-Control is the real finding",
-			200, map[string]string{"CF-Cache-Status": "HIT"}, true,
+			// The header was never collected — the site's extract_data did not
+			// name it — so nothing is known about the origin's policy. Saying
+			// "no caching policy" here accused origins that do send one.
+			"Cache-Control not extracted says nothing about the origin",
+			200, map[string]string{"CF-Cache-Status": "HIT"}, false,
+		},
+		{
+			// Collected and empty: the origin really did answer without one.
+			"CDN present and a collected-but-empty Cache-Control is the finding",
+			200, map[string]string{"CF-Cache-Status": "HIT", "Cache-Control": ""}, true,
+		},
+		{
+			// The reported bug: dearbaby.dk extracted only these two headers
+			// and was flagged on every page while serving a real policy.
+			"a site extracting only CDN headers is never accused",
+			200, map[string]string{"CF-Cache-Status": "HIT", "X-LiteSpeed-Cache": "hit"}, false,
 		},
 		{
 			"Cache-Control present means the origin has a policy",
@@ -620,7 +634,10 @@ func TestOneURLCanProduceManyIssues(t *testing.T) {
 	issues := ClassifyURL(URLState{
 		URL: "https://example.dk/bad", StatusCode: 200, ResponseTime: 7000,
 		RedirectedTo: "https://example.dk/other",
-		Headers:      map[string]string{"CF-Cache-Status": "BYPASS"},
+		// Cache-Control is present but empty: collected, and the origin sent
+		// none. Omitting the key would mean "not extracted", which is not a
+		// finding about the origin at all.
+		Headers:      map[string]string{"CF-Cache-Status": "BYPASS", "Cache-Control": ""},
 		FirstSeen:    first, LastSeen: last, Occurrences: 3,
 		Page: &PageSignals{
 			Title: "", TitleLength: 0, MetaDescription: "", Canonical: "",

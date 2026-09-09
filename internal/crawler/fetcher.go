@@ -137,10 +137,11 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, task *models.CrawlTask) *FetchR
 		if header == "" {
 			continue
 		}
-		value := resp.Header.Get(header)
-		if value != "" {
-			result.Headers[header] = value
-		}
+		// Recorded even when empty. An absent header and one that was never
+		// asked for are different facts, and dropping the empty case left the
+		// classifier unable to tell them apart — it read "not extracted" as
+		// "the origin sends none" and reported sites that do send one.
+		result.Headers[header] = resp.Header.Get(header)
 	}
 
 	return result
