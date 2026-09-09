@@ -1,0 +1,57 @@
+Broken links and redirects but I am not sure if Rashed and Co will cover this as well in their MorningScore-like SEO platform
+
+Also report bypass issues A URL is allowed to bypass once but never more than this
+
+Once is natural
+
+Split Issues into two menu points: crawler issues and SEO issues
+
+Crawler issues are the important ones for the SaaS — 301, 404 and 5xx.
+The crawler does its job better when those are not in the way.
+
+SEO issues are secondary. Pure bonus for a webshop owner, not related to the
+cache crawler. Still worth showing, just not mixed in with the crawler ones.
+
+---
+
+Redeploy data-loss audit (2026-09-09)
+
+Uploaded CSV url_source files are destroyed by every redeploy.
+
+CreateSite.php:307 and EditSite.php:203 take the CSV with
+FileUpload->disk('public')->directory('csv-uploads'), and CreateSite.php:508
+stores the site's url_source as asset('storage/'.$filePath). The backend
+re-fetches that URL on every round. The file lives in the container's
+storage/app/public, and the dashboard compose declares one volume —
+mysql_data:/var/lib/mysql. Nothing persists storage. So a deploy deletes the
+file, url_source 404s, and every future round for that site fails with no
+repair short of re-uploading.
+
+Latent right now: no production site currently uses a CSV source. It is a
+trapdoor under a shipped feature, not a live outage.
+
+Fix: a named volume for storage/app/public in the dashboard compose. Needs the
+volume declared on the Coolify resource too, so it is a deploy-time change
+rather than a code-only one.
+
+storage/logs is ephemeral for the same reason.
+
+This is why the dashboard crash investigation had no forensics — laravel.log
+was destroyed by the redeploy that appeared to fix it. Either give logs a
+volume as well or ship them to stdout so Coolify keeps them.
+
+AdminSeeder recreates a known-password super admin.
+
+Not an overwrite — it is firstOrCreate on admin@crawler.test, so an existing
+account is left alone. But if that user is ever deleted, the next deploy
+silently brings it back with Hash::make('password') and email_verified_at set.
+Worth dropping from DatabaseSeeder in production, or gating on
+APP_ENV !== 'production'.
+
+Seeders checked and safe: RoleSeeder (firstOrCreate on both roles),
+PackageSeeder (now firstOrCreate on all four tiers — it previously overwrote
+paid tiers on every deploy and reverted UI package edits).
+
+Not at risk on redeploy: config/route/view caches regenerate, storage:link is
+recreated by the entrypoint, MySQL has its volume, and Redis loss is already
+covered by the orphan-recovery sweep.
