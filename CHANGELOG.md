@@ -30,6 +30,12 @@ say why for decisions worth revisiting.
 - Crawls orphaned by a deploy are found and restarted automatically. See
   [ADR 0003](docs/adr/0003-restart-orphaned-crawls.md).
 
+### Changed
+
+- A cache bypass is reported only once it repeats. One bypass is natural — a
+  cold URL, a purge, a request that happened to carry a cookie — and flagging
+  every one buried the pages the CDN genuinely will never store.
+
 ### Fixed
 
 - Two accounts holding their own site record for the same domain could crawl it

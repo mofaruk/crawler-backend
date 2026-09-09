@@ -355,6 +355,10 @@ func TestCacheStatusClassification(t *testing.T) {
 			issues := ClassifyURL(URLState{
 				URL: "u", StatusCode: 200,
 				Headers: map[string]string{"CF-Cache-Status": tc.status, "Cache-Control": "max-age=60"},
+				// A repeated bypass: this case is about which status maps to
+				// which issue, not about the once-is-natural rule, which
+				// TestBypassReportedOnlyWhenRepeated covers.
+				Bypasses: 2,
 			}, nil)
 			var found []SiteIssue
 			for _, i := range issues {
@@ -638,6 +642,7 @@ func TestOneURLCanProduceManyIssues(t *testing.T) {
 		// none. Omitting the key would mean "not extracted", which is not a
 		// finding about the origin at all.
 		Headers:      map[string]string{"CF-Cache-Status": "BYPASS", "Cache-Control": ""},
+		Bypasses:     3,
 		FirstSeen:    first, LastSeen: last, Occurrences: 3,
 		Page: &PageSignals{
 			Title: "", TitleLength: 0, MetaDescription: "", Canonical: "",

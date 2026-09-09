@@ -574,6 +574,9 @@ type URLState struct {
 	FirstSeen    time.Time         `bson:"first_seen"`
 	LastSeen     time.Time         `bson:"last_seen"`
 	Occurrences  int               `bson:"occurrences"`
+	// Bypasses is how many of this URL's crawls the CDN bypassed, which is a
+	// different question from how many times it was crawled.
+	Bypasses int `bson:"bypasses"`
 }
 
 // Severity orders issues for display. Higher is worse.
@@ -725,7 +728,18 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 	cacheStatus := headerLookup(s.Headers, "CF-Cache-Status")
 	switch strings.ToUpper(cacheStatus) {
 	case "BYPASS":
-		add("cache_bypass", "Never cached", "CDN is bypassing the cache for this URL", SeverityWarning)
+		// One bypass is normal: a cold URL, a purge, a request that happened to
+		// carry a cookie. It is the *repeat* that says the CDN will never store
+		// this page, and reporting every single one buried that distinction
+		// under pages which were simply crawled once.
+		//
+		// Occurrences counts how many times this URL was seen in the window, so
+		// a URL still bypassing on its second crawl has stopped being natural.
+		if s.Bypasses > 1 {
+			add("cache_bypass", "Never cached",
+				fmt.Sprintf("The CDN has bypassed the cache for this URL %d times in this period", s.Bypasses),
+				SeverityWarning)
+		}
 	case "DYNAMIC":
 		add("cache_dynamic", "Not cacheable", "CDN treats this URL as dynamic", SeverityWarning)
 	case "EXPIRED":

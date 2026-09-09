@@ -57,6 +57,9 @@ func TestClassifyPerformanceAndCaching(t *testing.T) {
 	got := kinds(ClassifyURL(URLState{
 		URL: "u", StatusCode: 200, ResponseTime: 6000,
 		Headers: map[string]string{"CF-Cache-Status": "BYPASS"},
+		// Repeated, so the bypass is a finding rather than the one natural
+		// miss that TestBypassReportedOnlyWhenRepeated allows for.
+		Bypasses: 2,
 	}, nil))
 
 	if !got["very_slow"] {

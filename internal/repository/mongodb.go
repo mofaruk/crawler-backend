@@ -835,6 +835,24 @@ func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primi
 			"last_seen":     bson.M{"$first": "$crawled_at"},
 			"first_seen":    bson.M{"$last": "$crawled_at"},
 			"occurrences":   bson.M{"$sum": 1},
+			// How many of this URL's crawls the CDN bypassed. One bypass is
+			// normal — a cold URL, a purge, a request carrying a cookie — so
+			// the classifier needs the count to tell that from a page the CDN
+			// will never store. occurrences cannot answer it: that counts
+			// crawls, not bypasses.
+			"bypasses": bson.M{"$sum": bson.M{
+				"$cond": bson.A{
+					bson.M{"$regexMatch": bson.M{
+						"input": bson.M{"$ifNull": bson.A{
+							bson.M{"$getField": bson.M{"field": "CF-Cache-Status", "input": "$headers"}},
+							"",
+						}},
+						"regex":   "^bypass$",
+						"options": "i",
+					}},
+					1, 0,
+				},
+			}},
 		}}},
 		{{Key: "$sort", Value: bson.D{{Key: "status_code", Value: -1}}}},
 		{{Key: "$project", Value: bson.M{
@@ -849,6 +867,7 @@ func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primi
 			"first_seen":    1,
 			"last_seen":     1,
 			"occurrences":   1,
+			"bypasses":      1,
 		}}},
 	}
 
