@@ -55,3 +55,65 @@ paid tiers on every deploy and reverted UI package edits).
 Not at risk on redeploy: config/route/view caches regenerate, storage:link is
 recreated by the entrypoint, MySQL has its volume, and Redis loss is already
 covered by the orphan-recovery sweep.
+
+---
+
+Link checking as a product (2026-09-10)
+
+Prompted by drlinkcheck.com. They sell broken-link checking alone at
+$13-159/month: Lite free (2 sites, 1,500 links, one-time), Standard $13
+(5/10,000, monthly+biweekly), Professional $49 (10/50,000, weekly), Premium
+$159 (15/200,000, daily). No CDN cache analysis at all, so they are adjacent
+rather than competing — but they show what a finished link checker looks like.
+
+What we already have: link discovery during a crawl (page.go pulls <a href>,
+assets and stylesheets), storage with found_on referrer tracking, an HTTP
+checker with HEAD then GET fallback, redirect following, SSL and timeout
+errors, and bot-block classification that is broader than theirs — we handle
+454/455 from Danish hosts, they only list 403/429/430/503/999.
+
+What is missing, cheapest first:
+
+1. Blocked as a visible state. We classify bot-blocks correctly and then hide
+   them, so a report says "1 broken" where theirs says "1 broken, 8 blocked".
+   The customer cannot see that a link was skipped or why. Their wording is
+   worth copying: "the link will probably work when you check it out in your
+   browser."
+
+2. Scheduled checks. Nothing runs the checker automatically — it only runs
+   when someone clicks, and the button also refuses anything checked in the
+   last 24 hours, which is not obvious from the UI. Dearbaby sat with 1,000
+   unchecked links. This is the whole value of drlinkcheck's paid tiers.
+
+3. Soft-404 detection. We check status codes only, so a WordPress site serving
+   a 200 "nothing found" page passes clean. Their "large database of content
+   patterns" is a regex list — For sale, Ads only, Placeholder, Out of
+   service, No content, Directory listing, Error message are mostly
+   domain-parking and CMS defaults. Needs response bodies, so HEAD is no
+   longer enough.
+
+4. Named result categories. We store a status code and an error string; they
+   report about twenty named outcomes (Host not found, Connect error, SSL
+   handshake error, SSL certificate problem, Too many redirects, Crawler trap,
+   Bad content encoding, MX record not found). Mostly relabelling what we
+   already detect.
+
+5. Blacklist checks. Google Safe Browsing and PhishTank are both free. This is
+   their paid hook and it is cheap.
+
+6. Standalone crawl mode. The real blocker. Link discovery is currently a side
+   effect of a cache crawl — RecordOutboundLinks fires from worker/pool.go
+   inside a round. A link-check product must crawl a site with no
+   extract_data, no cache headers and no package tier. That means a second
+   crawl mode sharing the fetcher and queue while skipping everything
+   cache-related, and discovery mode is already flagged untested with a
+   channel-close race past 1024 queued pages.
+
+Recommendation: build 1-5 inside CacheCrawler before splitting anything out.
+They are worth having for existing customers regardless, and they are what a
+separate product would need anyway. Real usage then answers whether anyone
+wants it standalone, and by then only item 6 is left. Competing head-on with
+an established single-purpose tool means competing on their SEO; bundling
+means selling to people already paying us.
+
+Starting with 1 and 2.
