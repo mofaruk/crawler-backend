@@ -1299,6 +1299,11 @@ func (r *MongoRepository) TailCrawlingResults(
 	return results, nil
 }
 
+// foundOnListCap bounds the stored list of referencing pages. The count beside
+// it is what a report needs; the list is only ever a handful of examples to
+// find the template a link lives in.
+const foundOnListCap = 20
+
 func (r *MongoRepository) outboundLinks() *mongo.Collection {
 	return r.db.Collection("outbound_links")
 }
@@ -1331,20 +1336,37 @@ func (r *MongoRepository) RecordOutboundLinks(
 
 		filter := bson.M{"site_id": siteID, "url": link.URL}
 
-		update := bson.M{
-			"$set": bson.M{"last_seen_at": now},
-			"$setOnInsert": bson.M{
+		// An aggregation pipeline rather than plain operators, because
+		// found_on_count has to be derived from found_on in the same write:
+		// $addToSet cannot report the size of what it produced, and a separate
+		// update would leave the two disagreeing whenever one of them lost a
+		// race. The count was never written at all before this, so every link
+		// reported "on 0 pages" while listing the page it was on.
+		update := mongo.Pipeline{
+			{{Key: "$set", Value: bson.M{
 				"site_id":       siteID,
 				"url":           link.URL,
-				"first_seen_at": now,
-			},
-			// $addToSet dedupes but has no $slice; $push slices but does not
-			// dedupe. Dedup matters more here — the same page must not be
-			// listed twice — and the cap is enforced by the count field plus a
-			// bounded projection when reading.
-			"$addToSet": bson.M{
-				"found_on": bson.M{"$each": pages},
-			},
+				"last_seen_at":  now,
+				"first_seen_at": bson.M{"$ifNull": bson.A{"$first_seen_at", now}},
+				// Union, so a page already listed is not listed twice, and
+				// capped so a footer link on four hundred pages does not store
+				// four hundred URLs. The count below is the real answer.
+				"found_on": bson.M{
+					"$slice": bson.A{
+						bson.M{"$setUnion": bson.A{
+							bson.M{"$ifNull": bson.A{"$found_on", bson.A{}}},
+							pages,
+						}},
+						foundOnListCap,
+					},
+				},
+			}}},
+			{{Key: "$set", Value: bson.M{
+				"found_on_count": bson.M{"$size": bson.M{"$setUnion": bson.A{
+					bson.M{"$ifNull": bson.A{"$found_on", bson.A{}}},
+					pages,
+				}}},
+			}}},
 		}
 
 		models_ = append(models_,

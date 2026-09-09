@@ -105,6 +105,24 @@ func BotBlocked(statusCode int) bool {
 	case http.StatusBadRequest, http.StatusForbidden, http.StatusTooManyRequests,
 		http.StatusUnavailableForLegalReasons:
 		return true
+
+	// LinkedIn answers 999 to anything that is not a signed-in browser. It is
+	// not an HTTP status at all, which is the giveaway: no standard code lives
+	// there.
+	case 999:
+		return true
+	}
+
+	// A 4xx the spec never defined was invented by something in front of the
+	// site — 454 and 455 come from bot protection on ordinary sites that serve
+	// people perfectly well. Six of nlphuset.dk's eight "broken" links were
+	// these, and each one loaded in a browser.
+	//
+	// The defined 4xx codes stop at 431, apart from 451. Anything between is
+	// nobody's standard, so it is a challenge rather than a verdict on the
+	// page.
+	if statusCode > http.StatusRequestHeaderFieldsTooLarge && statusCode < 500 {
+		return true
 	}
 
 	return false

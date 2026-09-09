@@ -41,6 +41,13 @@ say why for decisions worth revisiting.
 
 ### Fixed
 
+- Links a destination merely blocks are no longer reported as broken. LinkedIn
+  answers 999 to anything but a signed-in browser, and bot protection on
+  ordinary sites answers 454 or 455 — codes no standard defines. All eight of
+  nlphuset.dk's "broken" links were these, and each one loads in a browser.
+- An outbound link says how many pages carry it. found_on_count was declared
+  but never written, so every link reported "on 0 pages" while listing the page
+  it was found on.
 - A broken image is no longer called a broken page. The title names what the
   URL is — image, stylesheet, script, font, media file, PDF or page — because a
   page referencing something no longer there and a route that no longer
