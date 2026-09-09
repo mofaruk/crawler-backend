@@ -852,7 +852,11 @@ func (r *MongoRepository) GetSiteIssuesBetween(ctx context.Context, siteID primi
 		}}},
 	}
 
-	cursor, err := r.crawlingResults().Aggregate(ctx, pipeline)
+	// allowDiskUse: the group reduces tens of thousands of results down to one
+	// row per URL, and a site with a long history exceeds the 100MB in-memory
+	// aggregation limit — at which point Mongo fails the query outright rather
+	// than answering slowly.
+	cursor, err := r.crawlingResults().Aggregate(ctx, pipeline, options.Aggregate().SetAllowDiskUse(true))
 	if err != nil {
 		return nil, 0, err
 	}

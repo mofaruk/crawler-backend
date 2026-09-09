@@ -39,6 +39,10 @@ type Handler struct {
 	dedup        *dedup.Deduplicator
 	parser       *source.URLParser
 	webhooks     *webhook.Dispatcher
+
+	// Classified issues are expensive enough that the dashboard's row of
+	// badges recomputed them once per site per render.
+	issueCache *issueCache
 }
 
 func NewHandler(
@@ -52,6 +56,7 @@ func NewHandler(
 	return &Handler{
 		cfg:          cfg,
 		repo:         repo,
+		issueCache:   newIssueCache(),
 		queue:        q,
 		stateManager: sm,
 		rateLimiter:  rl,
@@ -1160,7 +1165,17 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 		}
 	}
 
-	issues, total, err := h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, limit)
+	// Served from a short-lived cache. Classifying a site's issues means
+	// grouping every result in the window down to one row per URL and running
+	// each through the classifier — seconds on a site with a long history, and
+	// the dashboard asks for seven sites at once to draw a row of badges. The
+	// answer only changes when a crawl finishes, so recomputing it per request
+	// was the whole cost of the Sites page.
+	cacheKey := fmt.Sprintf("%s|%d|%d|%d", siteID.Hex(), since.Unix(), until.Unix(), limit)
+
+	issues, total, err := h.issueCache.get(cacheKey, func() ([]models.SiteIssue, int, error) {
+		return h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, limit)
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get site issues")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site issues"})
