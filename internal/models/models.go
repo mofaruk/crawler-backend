@@ -587,8 +587,11 @@ const (
 // (a slow page that is also uncached and missing a title), so issues are
 // reported per finding rather than per URL.
 type SiteIssue struct {
-	URL         string    `json:"url"`
-	Kind        string    `json:"kind"`
+	URL  string `json:"url"`
+	Kind string `json:"kind"`
+	// Category separates what this product is for from what it throws in.
+	// See IssueCategory.
+	Category    string    `json:"category"`
 	Title       string    `json:"title"`            // human-readable summary
 	Detail      string    `json:"detail,omitempty"` // the specific value found
 	Severity    int       `json:"severity"`
@@ -596,6 +599,65 @@ type SiteIssue struct {
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 	Occurrences int       `json:"occurrences"`
+}
+
+// Issue categories. Crawler issues are what this product exists to find: a
+// page that cannot be reached or cannot be cached is one the crawler cannot
+// warm, and it is what a customer is paying to hear about. SEO issues are a
+// bonus for a webshop owner — real findings, but not why they bought a cache
+// crawler, and mixing the two buried the ones that matter.
+const (
+	CategoryCrawler = "crawler"
+	CategorySEO     = "seo"
+)
+
+// issueCategories maps every kind to its category. Kinds absent from this map
+// are treated as crawler issues: a new check is far more likely to be about
+// reachability or caching, and over-reporting in the important list is a
+// smaller mistake than hiding something there.
+var issueCategories = map[string]string{
+	// Availability and caching — the crawler's own subject.
+	"broken":           CategoryCrawler,
+	"gone":             CategoryCrawler,
+	"server_error":     CategoryCrawler,
+	"unreachable":      CategoryCrawler,
+	"redirect":         CategoryCrawler,
+	"blank_page":       CategoryCrawler,
+	"slow":             CategoryCrawler,
+	"very_slow":        CategoryCrawler,
+	"cache_bypass":     CategoryCrawler,
+	"cache_dynamic":    CategoryCrawler,
+	"cache_expired":    CategoryCrawler,
+	"cache_forbidden":  CategoryCrawler,
+	"cache_stale":      CategoryCrawler,
+	"no_cache_control": CategoryCrawler,
+	// A soft 404 is a page that answers 200 while being gone. Warming it fills
+	// the cache with an error page, which is the crawler's problem, not an SEO
+	// nicety.
+	"soft_404": CategoryCrawler,
+
+	// Content quality — useful, but not what a cache crawler is bought for.
+	"duplicate_title":          CategorySEO,
+	"images_missing_alt":       CategorySEO,
+	"long_title":               CategorySEO,
+	"missing_canonical":        CategorySEO,
+	"missing_meta_description": CategorySEO,
+	"missing_title":            CategorySEO,
+	"mixed_content":            CategorySEO,
+	"noindex":                  CategorySEO,
+	"missing_h1":               CategorySEO,
+	"multiple_h1":              CategorySEO,
+	"short_title":              CategorySEO,
+	"thin_content":             CategorySEO,
+}
+
+// IssueCategory returns the category a kind belongs to.
+func IssueCategory(kind string) string {
+	if c, ok := issueCategories[kind]; ok {
+		return c
+	}
+
+	return CategoryCrawler
 }
 
 // Thresholds for the quality checks. Chosen to flag real problems rather than
@@ -618,7 +680,8 @@ func ClassifyURL(s URLState, titleCounts map[string]int) []SiteIssue {
 
 	add := func(kind, title, detail string, severity int) {
 		out = append(out, SiteIssue{
-			URL: s.URL, Kind: kind, Title: title, Detail: detail,
+			URL: s.URL, Kind: kind, Category: IssueCategory(kind),
+			Title: title, Detail: detail,
 			Severity: severity, StatusCode: s.StatusCode,
 			FirstSeen: s.FirstSeen, LastSeen: s.LastSeen, Occurrences: s.Occurrences,
 		})

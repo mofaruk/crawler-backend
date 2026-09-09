@@ -992,9 +992,9 @@ func (h *Handler) PruneCrawlings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"site_id":            req.SiteID,
-		"before":             before.UTC().Format(time.RFC3339),
-		"deleted_crawlings":  deleted,
+		"site_id":               req.SiteID,
+		"before":                before.UTC().Format(time.RFC3339),
+		"deleted_crawlings":     deleted,
 		"rolled_up_to_timeline": rolled,
 	})
 }
@@ -1142,6 +1142,13 @@ func (h *Handler) GetSiteAnalytics(c *gin.Context) {
 // This is the "site health" view: broken links, gone pages and server errors,
 // aggregated across every crawl in the window rather than a single round, so a
 // customer sees what is wrong with their site rather than what one crawl saw.
+// issueFetchAll is the cap on issues classified per site.
+//
+// The cached list is filtered and paged in the handler, so this bounds memory
+// rather than what a caller sees. Ten thousand is far above any site's real
+// count and keeps one pathological site from holding an unbounded slice.
+const issueFetchAll = int64(10000)
+
 func (h *Handler) GetSiteIssues(c *gin.Context) {
 	siteID, err := primitive.ObjectIDFromHex(c.Param("id"))
 	if err != nil {
@@ -1171,10 +1178,16 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 	// the dashboard asks for seven sites at once to draw a row of badges. The
 	// answer only changes when a crawl finishes, so recomputing it per request
 	// was the whole cost of the Sites page.
-	cacheKey := fmt.Sprintf("%s|%d|%d|%d", siteID.Hex(), since.Unix(), until.Unix(), limit)
+	// Cached and truncated per window, not per limit: the expensive part is
+	// classifying the site, and every caller of the same window wants the same
+	// answer. `limit` and `category` are applied to the cached list below —
+	// truncating first would have meant a category filter running on rows the
+	// repository had already cut, so asking for one SEO issue could return
+	// none while the site had hundreds.
+	cacheKey := fmt.Sprintf("%s|%d|%d", siteID.Hex(), since.Unix(), until.Unix())
 
 	issues, total, err := h.issueCache.get(cacheKey, func() ([]models.SiteIssue, int, error) {
-		return h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, limit)
+		return h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, issueFetchAll)
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get site issues")
@@ -1182,11 +1195,40 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 		return
 	}
 
+	// Crawler issues are what this product is for; SEO ones are a bonus. The
+	// dashboard lists them separately, so the filter is applied here rather
+	// than by the caller throwing half the payload away.
+	//
+	// Counted before filtering, so each list can say how many the other holds
+	// without asking for it.
+	byCategory := map[string]int{
+		models.CategoryCrawler: 0,
+		models.CategorySEO:     0,
+	}
+	for _, i := range issues {
+		byCategory[i.Category]++
+	}
+
+	if category := strings.ToLower(strings.TrimSpace(c.Query("category"))); category != "" {
+		kept := make([]models.SiteIssue, 0, len(issues))
+		for _, i := range issues {
+			if i.Category == category {
+				kept = append(kept, i)
+			}
+		}
+		issues = kept
+		total = byCategory[category]
+	}
+
+	// Applied after the category filter, so a page of one category is a full
+	// page of it.
+	if int64(len(issues)) > limit {
+		issues = issues[:limit]
+	}
+
 	// Counts by kind, so the UI can headline "3 broken links" without
-	// re-deriving it from the list. Counted over the returned page: the
-	// repository already truncated to `limit`, so a caller that asked for a
-	// page gets that page's breakdown, while `total` below stays the site's
-	// real issue count.
+	// re-deriving it from the list. Counted over the returned page, while
+	// `total` below stays the site's real issue count.
 	byKind := map[string]int{}
 	for _, i := range issues {
 		byKind[i.Kind]++
@@ -1200,9 +1242,10 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 		// The site's issue count, not len(data): the dashboard asks for
 		// limit=1 to render a badge, and reporting the page size capped
 		// every badge at 1.
-		"total":   total,
-		"by_kind": byKind,
-		"data":    issues,
+		"total":       total,
+		"by_kind":     byKind,
+		"by_category": byCategory,
+		"data":        issues,
 	})
 }
 
