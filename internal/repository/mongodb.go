@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/webkonsulenterne/crawler-backend/internal/config"
+	"github.com/webkonsulenterne/crawler-backend/internal/linkcheck"
 	"github.com/webkonsulenterne/crawler-backend/internal/models"
 )
 
@@ -1449,9 +1450,16 @@ func (r *MongoRepository) BrokenOutboundLinks(
 	siteID primitive.ObjectID,
 	limit int64,
 ) ([]models.OutboundLink, error) {
-	// Mirrors models.OutboundLink.Broken(): statuses that usually mean "we
-	// block bots" (400, 403, 429, 451) are excluded, because social platforms
-	// answer those to any non-browser request while serving people fine.
+	// Same rule as models.OutboundLink.Broken(), taken from the same source:
+	// linkcheck decides which statuses mean "we block bots" rather than "this
+	// page is gone". The excluded codes were once written out here by hand and
+	// fell behind the checker, which left links the checker had cleared still
+	// listed as broken.
+	notBroken := make(bson.A, 0, len(linkcheck.NotBrokenStatuses()))
+	for _, status := range linkcheck.NotBrokenStatuses() {
+		notBroken = append(notBroken, status)
+	}
+
 	filter := bson.M{
 		"site_id":    siteID,
 		"checked_at": bson.M{"$ne": nil},
@@ -1460,7 +1468,7 @@ func (r *MongoRepository) BrokenOutboundLinks(
 			bson.M{
 				"status_code": bson.M{
 					"$gte": 400,
-					"$nin": bson.A{400, 403, 429, 451},
+					"$nin": notBroken,
 				},
 			},
 		},

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/webkonsulenterne/crawler-backend/internal/linkcheck"
 )
 
 // --- Crawl Job States ---
@@ -481,10 +483,11 @@ type OutboundLink struct {
 // A transport error or a 404/410/5xx counts. Redirects do not: a link that
 // redirects still gets the visitor somewhere.
 //
-// Statuses that usually mean "we block bots" (400, 403, 429) are deliberately
-// excluded — social platforms answer those to any non-browser request while
-// serving people fine, and reporting a customer's own Facebook page as broken
-// would discredit the whole report.
+// Statuses meaning "we block bots" rather than "this page is gone" are
+// excluded, and linkcheck.BotBlocked is the single definition of which those
+// are. It used to be restated here as a literal list, which drifted: the
+// checker learned about 999 and the undefined 4xx codes while this copy did
+// not, so a link the checker counted as fine was still listed as broken.
 func (l OutboundLink) Broken() bool {
 	if l.CheckedAt == nil {
 		return false
@@ -494,8 +497,7 @@ func (l OutboundLink) Broken() bool {
 		return true
 	}
 
-	switch l.StatusCode {
-	case 400, 403, 429, 451:
+	if linkcheck.BotBlocked(l.StatusCode) {
 		return false
 	}
 

@@ -45,6 +45,10 @@ say why for decisions worth revisiting.
   answers 999 to anything but a signed-in browser, and bot protection on
   ordinary sites answers 454 or 455 — codes no standard defines. All eight of
   nlphuset.dk's "broken" links were these, and each one loads in a browser.
+- The broken-link list agrees with the link checker. The rule for "blocked
+  rather than gone" was written out three times, and only the checker was
+  updated: it reported nothing broken while the list beside it still showed the
+  same links as broken. All three now read one definition.
 - An outbound link says how many pages carry it. found_on_count was declared
   but never written, so every link reported "on 0 pages" while listing the page
   it was found on.

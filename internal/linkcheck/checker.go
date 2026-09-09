@@ -204,3 +204,26 @@ func (c *Checker) CheckAll(ctx context.Context, urls []string, concurrency int) 
 
 	return results
 }
+
+// NotBrokenStatuses lists every status BotBlocked treats as a challenge rather
+// than a dead page.
+//
+// It exists so a database query can express the same rule without restating
+// it. The list used to be written out by hand at each call site, and the copies
+// drifted apart: the checker learned about 999 and the undefined 4xx codes
+// while the query listing broken links did not, so links the checker had
+// cleared were still reported as broken. Deriving the list from BotBlocked
+// means there is one definition and the others cannot fall behind it.
+func NotBrokenStatuses() []int {
+	var codes []int
+
+	// The whole range a check can plausibly return. Below 400 is not broken to
+	// begin with, and 1000 is past every real and invented code.
+	for status := 400; status < 1000; status++ {
+		if BotBlocked(status) {
+			codes = append(codes, status)
+		}
+	}
+
+	return codes
+}
