@@ -85,3 +85,26 @@ a passing one.
   queued pages, and no early return once `url_limit` is reached.
 - `webhook` package, `MarkSeenBatch`, `DequeueBatch`, `BulkInsertResults` and
   the `crawl_urls` collection are all dead code.
+
+## Recording changes and decisions
+
+Two files, both in the repo. Neither is optional bookkeeping — they are how the
+next person understands why the code is shaped the way it is.
+
+**`CHANGELOG.md`** — one entry per change worth a customer or an operator
+knowing about, added to `## [Unreleased]` as part of the same commit that makes
+the change. Grouped Security / Added / Fixed / Performance, moved under a
+version on release. Write what changed for someone *using* the product; the
+commit already says how.
+
+**`docs/adr/`** — one file per decision that would otherwise have to be
+reconstructed from a diff. Not every change needs one: a bug fix explains
+itself. Write one when the reasoning matters more than the change, or when the
+obvious alternative was rejected for a reason someone will later be tempted to
+undo — "restart orphaned crawls rather than resume them", not "fixed a typo".
+
+Numbered in order, never renumbered. A superseded ADR keeps its file and gains
+a note pointing at its replacement; the wrong turn is part of the record.
+
+The dashboard keeps its own `CHANGELOG.md`. Decisions spanning both repos live
+here, since the engine is where the behaviour is.
