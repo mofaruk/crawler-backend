@@ -29,6 +29,12 @@ say why for decisions worth revisiting.
   so a report was as old as the last person who thought to refresh it —
   dearbaby.dk sat with a thousand links that had never been checked at all. A
   bounded batch per site every ten minutes, nothing re-checked inside a week.
+- Social share buttons are no longer collected as outbound links. They point at
+  widget endpoints that mean nothing without a live visitor's click, and
+  Facebook and AddToAny answer 400 to a bare request, so each one arrived in
+  the report as a link that refused the check — nlphuset.dk carried 172 AddToAny
+  entries against 22 real links. An ordinary link to one of those sites, such as
+  a page's own LinkedIn profile, is still collected.
 - An issue about an asset now names a page that references it. A broken image
   is fixed where it is referenced, not at its own address, and the report could
   not previously say where that was.
