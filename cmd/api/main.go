@@ -71,6 +71,13 @@ func main() {
 	// Create handler
 	handler := api.NewHandler(cfg, repo, q, sm, rl, dd)
 
+	// Recover crawls a deploy or a Redis restart orphaned: Mongo still calls
+	// them running, but their queue and dispatcher registration are gone, so
+	// no worker will ever look at them again.
+	recoveryCtx, stopRecovery := context.WithCancel(context.Background())
+	defer stopRecovery()
+	handler.StartOrphanRecovery(recoveryCtx)
+
 	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
