@@ -40,9 +40,9 @@ type Handler struct {
 	parser       *source.URLParser
 	webhooks     *webhook.Dispatcher
 
-	// Classified issues are expensive enough that the dashboard's row of
-	// badges recomputed them once per site per render.
-	issueCache *issueCache
+	// Issue classification and window aggregations are expensive enough that
+	// the dashboard recomputed them once per site per render.
+	results *resultCache
 }
 
 func NewHandler(
@@ -56,7 +56,7 @@ func NewHandler(
 	return &Handler{
 		cfg:          cfg,
 		repo:         repo,
-		issueCache:   newIssueCache(),
+		results:      newResultCache(),
 		queue:        q,
 		stateManager: sm,
 		rateLimiter:  rl,
@@ -1106,26 +1106,46 @@ func (h *Handler) GetSiteAnalytics(c *gin.Context) {
 	// Same window semantics as /issues: rolling days, or an explicit range.
 	from, to, days := resolveWindow(c, 7, 90)
 
-	statusValues, statusTotal, err := h.repo.GetSiteStatusAnalytics(c.Request.Context(), siteID, from, to)
+	// One aggregation for the status breakdown and one per extracted header,
+	// each scanning the same window of results — seconds on a large site, and
+	// the answer only changes when a crawl finishes. Cached as a unit and
+	// keyed on the window, so concurrent callers share one computation.
+	type analyticsResult struct {
+		statusValues any
+		statusTotal  int64
+		headers      gin.H
+	}
+
+	cached, err := h.results.get(fmt.Sprintf("analytics|%s|%d|%d", siteID.Hex(), from.Unix(), to.Unix()), func() (any, error) {
+		statusValues, statusTotal, err := h.repo.GetSiteStatusAnalytics(c.Request.Context(), siteID, from, to)
+		if err != nil {
+			return nil, err
+		}
+
+		headers := gin.H{}
+		for _, header := range site.ExtractData {
+			header = strings.TrimSpace(header)
+			if header == "" {
+				continue
+			}
+			values, total, err := h.repo.GetSiteHeaderAnalytics(c.Request.Context(), siteID, header, from, to)
+			if err != nil {
+				log.Error().Err(err).Str("header", header).Msg("failed to get site header analytics")
+				continue // skip this header rather than failing the whole response
+			}
+			headers[header] = gin.H{"total": total, "values": values}
+		}
+
+		return analyticsResult{statusValues: statusValues, statusTotal: statusTotal, headers: headers}, nil
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get site status analytics")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site analytics"})
 		return
 	}
 
-	headers := gin.H{}
-	for _, header := range site.ExtractData {
-		header = strings.TrimSpace(header)
-		if header == "" {
-			continue
-		}
-		values, total, err := h.repo.GetSiteHeaderAnalytics(c.Request.Context(), siteID, header, from, to)
-		if err != nil {
-			log.Error().Err(err).Str("header", header).Msg("failed to get site header analytics")
-			continue // skip this header rather than failing the whole response
-		}
-		headers[header] = gin.H{"total": total, "values": values}
-	}
+	result, _ := cached.(analyticsResult)
+	statusValues, statusTotal, headers := result.statusValues, result.statusTotal, result.headers
 
 	c.JSON(http.StatusOK, gin.H{
 		"site_id": siteID.Hex(),
@@ -1186,14 +1206,24 @@ func (h *Handler) GetSiteIssues(c *gin.Context) {
 	// none while the site had hundreds.
 	cacheKey := fmt.Sprintf("%s|%d|%d", siteID.Hex(), since.Unix(), until.Unix())
 
-	issues, total, err := h.issueCache.get(cacheKey, func() ([]models.SiteIssue, int, error) {
-		return h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, issueFetchAll)
+	type issueResult struct {
+		issues []models.SiteIssue
+		total  int
+	}
+
+	cached, err := h.results.get("issues|"+cacheKey, func() (any, error) {
+		list, total, err := h.repo.GetSiteIssuesBetween(c.Request.Context(), siteID, since, until, issueFetchAll)
+
+		return issueResult{issues: list, total: total}, err
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get site issues")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to get site issues"})
 		return
 	}
+
+	result, _ := cached.(issueResult)
+	issues, total := result.issues, result.total
 
 	// Crawler issues are what this product is for; SEO ones are a bonus. The
 	// dashboard lists them separately, so the filter is applied here rather
@@ -1278,7 +1308,10 @@ func (h *Handler) GetSiteTimeline(c *gin.Context) {
 	// Merged: stored points for rounds whose results have been pruned, live
 	// ones for rounds that still have them. Reading only the live aggregation
 	// would make the graph end wherever retention did.
-	points, err := h.repo.MergedTimeline(c.Request.Context(), siteID, since, limit)
+	cachedPoints, err := h.results.get(fmt.Sprintf("timeline|%s|%d|%d", siteID.Hex(), since.Unix(), limit), func() (any, error) {
+		return h.repo.MergedTimeline(c.Request.Context(), siteID, since, limit)
+	})
+	points, _ := cachedPoints.([]models.TimelinePoint)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to build site timeline")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to build site timeline"})
