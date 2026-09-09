@@ -154,7 +154,28 @@ func (h *Handler) CreateSite(c *gin.Context) {
 // GET /sites
 func (h *Handler) ListSites(c *gin.Context) {
 	skip, limit := parsePagination(c)
-	sites, total, err := h.repo.ListSites(c.Request.Context(), skip, limit)
+
+	filter := repository.SiteFilter{Search: c.Query("search")}
+
+	// ids= restricts the listing to the caller's own sites. The dashboard used
+	// to fetch a fixed page and filter in PHP, which put a customer's later
+	// sites out of reach entirely; passing the set here keeps the paging and
+	// the total honest. An ids= that parses to nothing stays non-nil so it
+	// matches no sites rather than silently listing everyone's.
+	// Presence, not emptiness: a caller that owns no sites sends ids= with
+	// nothing after it, and treating that as "no filter" would serve them
+	// every tenant's sites.
+	if raw, present := c.GetQuery("ids"); present {
+		ids := []primitive.ObjectID{}
+		for _, hex := range strings.Split(raw, ",") {
+			if oid, err := primitive.ObjectIDFromHex(strings.TrimSpace(hex)); err == nil {
+				ids = append(ids, oid)
+			}
+		}
+		filter.IDs = ids
+	}
+
+	sites, total, err := h.repo.ListSitesFiltered(c.Request.Context(), filter, skip, limit)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to list sites")
 		c.JSON(http.StatusInternalServerError, models.ErrorResponse{Error: "failed to list sites"})

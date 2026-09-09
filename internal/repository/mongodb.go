@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -200,13 +201,51 @@ func (r *MongoRepository) GetSite(ctx context.Context, id primitive.ObjectID) (*
 }
 
 func (r *MongoRepository) ListSites(ctx context.Context, skip, limit int64) ([]models.Site, int64, error) {
-	total, err := r.sites().CountDocuments(ctx, bson.M{})
+	return r.ListSitesFiltered(ctx, SiteFilter{}, skip, limit)
+}
+
+// SiteFilter narrows a site listing. The zero value matches everything, so
+// ListSites stays a filterless call.
+type SiteFilter struct {
+	// Search matches name or base_url, case-insensitively, on a substring.
+	Search string
+
+	// IDs restricts the listing to these sites. Non-nil but empty matches
+	// nothing, which is what a customer who owns no sites should see —
+	// distinct from nil, which means "no ownership restriction".
+	IDs []primitive.ObjectID
+}
+
+// ListSitesFiltered pages through sites the database has already narrowed.
+//
+// The dashboard used to fetch a fixed 100 and filter in PHP, so a customer's
+// 101st site was unreachable and every search only searched the page in hand.
+// Both the filter and the count come from Mongo now, so a page costs one page
+// of rows however many sites exist.
+func (r *MongoRepository) ListSitesFiltered(ctx context.Context, filter SiteFilter, skip, limit int64) ([]models.Site, int64, error) {
+	query := bson.M{}
+
+	if filter.IDs != nil {
+		query["_id"] = bson.M{"$in": filter.IDs}
+	}
+
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		// Quoted so a customer searching for "site.dk" is not writing a
+		// regular expression against the collection.
+		pattern := primitive.Regex{Pattern: regexp.QuoteMeta(search), Options: "i"}
+		query["$or"] = bson.A{
+			bson.M{"name": pattern},
+			bson.M{"base_url": pattern},
+		}
+	}
+
+	total, err := r.sites().CountDocuments(ctx, query)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	opts := options.Find().SetSkip(skip).SetLimit(limit).SetSort(bson.D{{Key: "created_at", Value: -1}})
-	cursor, err := r.sites().Find(ctx, bson.M{}, opts)
+	cursor, err := r.sites().Find(ctx, query, opts)
 	if err != nil {
 		return nil, 0, err
 	}
