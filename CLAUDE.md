@@ -108,3 +108,11 @@ a note pointing at its replacement; the wrong turn is part of the record.
 
 The dashboard keeps its own `CHANGELOG.md`. Decisions spanning both repos live
 here, since the engine is where the behaviour is.
+
+## Production dashboard crash loop
+
+The dashboard's Coolify resource periodically hits "Restart limit reached";
+cause unknown as of 2026-09-11, several theories already ruled out. Read
+`docs/ops/dashboard-crash-capture.md` before investigating — it lists what is
+dead, what capture is running on the server, and exactly what to collect
+*before* redeploying.
