@@ -117,3 +117,55 @@ an established single-purpose tool means competing on their SEO; bundling
 means selling to people already paying us.
 
 Starting with 1 and 2.
+
+---
+
+Database backups — decided, not built (2026-09-11)
+
+There are no backups of the dashboard database. Losing it ends the business:
+users, sites, packages, invitations and support tickets all live there. Mongo
+holds crawl history, which is embarrassing to lose but recoverable by
+re-crawling, so it is a separate and lesser decision.
+
+The database is about 1.3 MB. Daily backups with 90 days retention is roughly
+120 MB, so size rules nothing out.
+
+Where it landed after working through the options:
+
+Google Drive works and is free, but its OAuth refresh token expires — after
+seven days if the consent screen is left in Testing, which is the default and
+easy to miss — and a backup job that stops silently is worse than none. A
+service account avoids the token entirely and would be the way to do it if
+Drive is chosen.
+
+Backblaze B2 was the pick: 10 GB free permanently, no card at signup, and
+S3-compatible so Laravel's built-in s3 driver works and the target can be
+swapped by env var later. Blocked: their signup emails never arrived.
+
+Cloudflare R2 is equivalent and also free at this size, but sources disagree
+about whether enabling it needs a card on file.
+
+Chosen direction: push backups over HTTP to a receiver endpoint on another
+Laravel app on a different VPS. Genuinely offsite, free, no vendor account.
+More code than an SFTP user and a larger attack surface, but nothing to renew
+and nothing that expires.
+
+Conditions, all of which matter more than the transport:
+
+  - Encrypt the zip. The receiver is infrastructure that exists for something
+    else and should hold a blob it cannot read.
+  - Store outside the web root. A backup zip reachable by URL is the whole
+    customer database, downloadable.
+  - hash_equals for the token, not ===.
+  - Rate limit and a size cap, so a leaked token cannot fill someone's disk.
+  - HTTPS only.
+  - Back up to local disk as well, so a receiver outage does not mean no
+    backup at all.
+  - Prove it by restoring into a scratch database. A backup nobody has
+    restored is a guess.
+
+spatie/laravel-backup does the dump, zip, encryption, retention and a
+health check that alerts when the newest backup is missing or too small. The
+crawler_scheduler container already runs, so there is nothing new to host.
+
+Paused at the user's request. Nothing built yet.
