@@ -58,6 +58,18 @@ say why for decisions worth revisiting.
 
 ### Fixed
 
+- A crawl round in which every URL was still cached no longer copies the
+  previous round's results into itself. Smart recrawl carries still-cached
+  results forward so a partial round reads as a complete report, but when
+  nothing at all was fetched the round was the previous report again, row for
+  row — nlphuset.dk accumulated a hundred such rounds in under two hours, each
+  writing 1,445 result documents, which is how the crawlings collection reached
+  22,000 rounds. Such a round is now closed with no URLs, no results and a
+  recorded reason. See [ADR 0004](docs/adr/0004-a-round-that-fetches-nothing-records-nothing.md).
+- A page size above an endpoint's maximum is reduced to the maximum rather
+  than replaced with the default. The dashboard asked `/crawlings` for 200
+  rounds, received 20 with nothing to say so, and built "never crawled" for a
+  site with 2,347 rounds out of a six-hour window.
 - Links a destination merely blocks are no longer reported as broken. LinkedIn
   answers 999 to anything but a signed-in browser, and bot protection on
   ordinary sites answers 454 or 455 — codes no standard defines. All eight of

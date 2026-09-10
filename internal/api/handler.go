@@ -600,7 +600,10 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		}
 	}
 
-	if len(carryForward) > 0 {
+	// Carried forward only when this round fetches something. Otherwise the
+	// round would be the previous report copied row for row — see
+	// finishWithNothingToFetch.
+	if len(carryForward) > 0 && totalEnqueued > 0 {
 		if err := h.repo.CarryForwardResults(ctx, oid, carryForward); err != nil {
 			logger.Error().Err(err).Int("count", len(carryForward)).Msg("failed to carry results forward")
 		}
@@ -630,19 +633,9 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		Int("carried_forward", len(carryForward)).
 		Msg("URL ingestion complete")
 
-	// The total counts carried-forward URLs too: they are part of the report
-	// even though they cost no request, and excluding them would make the
-	// site look like it shrank.
-	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, totalEnqueued+len(carryForward))
-
 	if totalEnqueued == 0 {
-		// Everything was carried forward: nothing to fetch, so the round is
-		// already complete rather than an error.
 		if len(carryForward) > 0 {
-			_ = h.repo.SetCrawlingCrawledURLs(ctx, oid, len(carryForward))
-			_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
-			_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
-			logger.Info().Msg("every URL was still cached; nothing needed fetching")
+			h.finishWithNothingToFetch(ctx, oid, crawlingID)
 			return
 		}
 
@@ -650,6 +643,11 @@ func (h *Handler) ingestURLs(crawlingID string, site *models.Site, crawling *mod
 		_ = h.repo.SetCrawlingError(ctx, oid, "no URLs passed the url_type filter; nothing to crawl")
 		return
 	}
+
+	// The total counts carried-forward URLs too: they are part of the report
+	// even though they cost no request, and excluding them would make the
+	// site look like it shrank.
+	_ = h.repo.SetCrawlingTotalURLs(ctx, oid, totalEnqueued+len(carryForward))
 
 	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusRunning)
 	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusRunning)
@@ -1379,9 +1377,7 @@ func (h *Handler) ListCrawledURLs(c *gin.Context) {
 	filter := buildResultsFilter(c)
 
 	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = clampLimit(limit, 50, 200)
 
 	var cursor primitive.ObjectID
 	if raw := c.Query("cursor"); raw != "" {
@@ -1593,12 +1589,27 @@ func (h *Handler) Health(c *gin.Context) {
 
 // --- Helpers ---
 
+// clampLimit bounds a caller's page size.
+//
+// A value above the maximum becomes the maximum, not the default. It used to
+// reset to the default, silently: the dashboard asked for 200 rounds, received
+// 20 with nothing in the response to say so, and built "never crawled" for a
+// site with 2,347 rounds out of a six-hour window.
+func clampLimit(limit, def, max int64) int64 {
+	if limit <= 0 {
+		return def
+	}
+	if limit > max {
+		return max
+	}
+
+	return limit
+}
+
 func parsePagination(c *gin.Context) (int64, int64) {
 	skip, _ := strconv.ParseInt(c.DefaultQuery("skip", "0"), 10, 64)
 	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "20"), 10, 64)
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
+	limit = clampLimit(limit, 20, 100)
 	if skip < 0 {
 		skip = 0
 	}
@@ -1765,9 +1776,7 @@ func (h *Handler) TailCrawledURLs(c *gin.Context) {
 	}
 
 	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = clampLimit(limit, 50, 200)
 
 	var after primitive.ObjectID
 	if raw := c.Query("after"); raw != "" {
@@ -1827,9 +1836,7 @@ func (h *Handler) CheckSiteLinks(c *gin.Context) {
 	}
 
 	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit = clampLimit(limit, 50, 200)
 
 	// A destination checked recently is not worth re-checking: the answer will
 	// not have changed, and it is someone else's server.
@@ -1897,9 +1904,7 @@ func (h *Handler) GetBrokenLinks(c *gin.Context) {
 	}
 
 	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "100"), 10, 64)
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = clampLimit(limit, 100, 500)
 
 	links, err := h.repo.BrokenOutboundLinks(c.Request.Context(), siteID, limit)
 	if err != nil {
@@ -2052,14 +2057,22 @@ func (h *Handler) useStoredURLList(
 		})
 	}
 
+	if len(tasks) == 0 && len(carryForward) == 0 {
+		return false
+	}
+
+	if len(tasks) == 0 {
+		h.finishWithNothingToFetch(ctx, oid, crawlingID)
+
+		return true
+	}
+
+	// Only now that the round is known to fetch something: a round that only
+	// carried results forward would be the previous report copied.
 	if len(carryForward) > 0 {
 		if err := h.repo.CarryForwardResults(ctx, oid, carryForward); err != nil {
 			logger.Error().Err(err).Msg("failed to carry results forward")
 		}
-	}
-
-	if len(tasks) == 0 && len(carryForward) == 0 {
-		return false
 	}
 
 	for i := 0; i < len(tasks); i += 1000 {
@@ -2077,14 +2090,6 @@ func (h *Handler) useStoredURLList(
 		Time("list_built", *site.URLsBuiltAt).
 		Msg("crawling from the stored URL list")
 
-	if len(tasks) == 0 {
-		// Everything was still cached; nothing to fetch.
-		_ = h.repo.SetCrawlingCrawledURLs(ctx, oid, len(carryForward))
-		_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
-		_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
-		return true
-	}
-
 	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusRunning)
 	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusRunning)
 	_ = h.stateManager.AddActiveCrawling(ctx, crawlingID)
@@ -2092,6 +2097,32 @@ func (h *Handler) useStoredURLList(
 	metrics.ActiveCrawlingsGauge.Inc()
 
 	return true
+}
+
+// nothingToFetchReason is recorded on a round in which every URL was still
+// cached, so the dashboard can say why a "completed" round has no URLs.
+const nothingToFetchReason = "Nothing was fetched: every URL was still cached from the previous round and inside the site's re-check age."
+
+// finishWithNothingToFetch closes a round that had no work to do.
+//
+// Recorded as completed with no URLs and no results, rather than as a copy of
+// the previous round. Smart recrawl carries still-cached results forward so
+// that a partial round reads as a complete report, and that is right when the
+// round fetched something. When it fetched nothing, the carried-forward rows
+// are the previous report again, row for row — and the scheduler, seeing a
+// finished round, started the next one a minute later. nlphuset.dk
+// accumulated a hundred such rounds in under two hours, each writing 1,445
+// result documents to record that nothing had changed: about two million rows
+// a day of no information, and how the crawlings collection reached 22,000.
+//
+// The zero totals are also the signal the scheduler reads: a round that did
+// nothing is a reason to wait, not to go again.
+func (h *Handler) finishWithNothingToFetch(ctx context.Context, oid primitive.ObjectID, crawlingID string) {
+	_ = h.repo.SetCrawlingStoppedReason(ctx, oid, nothingToFetchReason)
+	_ = h.repo.UpdateCrawlingStatus(ctx, oid, models.CrawlStatusCompleted)
+	_ = h.stateManager.SetState(ctx, crawlingID, models.CrawlStatusCompleted)
+
+	log.Info().Str("crawling_id", crawlingID).Msg("every URL was still cached; nothing fetched and nothing recorded")
 }
 
 // GetSiteURLList reports what is in a site's stored URL list.

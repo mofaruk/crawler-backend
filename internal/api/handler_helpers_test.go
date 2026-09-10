@@ -101,8 +101,11 @@ func TestParsePagination(t *testing.T) {
 		{"no parameters uses the defaults", "", 0, 20},
 		{"explicit values pass through", "skip=40&limit=50", 40, 50},
 		{"limit of 100 is the maximum allowed", "limit=100", 0, 100},
-		{"limit above the cap falls back to the default", "limit=101", 0, 20},
-		{"a huge limit falls back to the default", "limit=100000", 0, 20},
+		// Reduced to the cap, not reset to the default: the dashboard asked
+		// for 200 rounds, silently got 20, and called a site with 2,347
+		// rounds "never crawled" out of a six-hour window.
+		{"limit above the cap is reduced to the cap", "limit=101", 0, 100},
+		{"a huge limit is reduced to the cap", "limit=100000", 0, 100},
 		{"zero limit falls back to the default", "limit=0", 0, 20},
 		{"negative limit falls back to the default", "limit=-5", 0, 20},
 		{"negative skip is clamped to zero", "skip=-10", 0, 20},
@@ -570,5 +573,29 @@ func TestResolveWindowIsStableAcrossCalls(t *testing.T) {
 	if !since1.Equal(since2) || !until1.Equal(until2) {
 		t.Fatalf("window moved between identical calls: (%v, %v) then (%v, %v)",
 			since1, until1, since2, until2)
+	}
+}
+
+// A page size over the maximum is reduced to it. It used to be replaced with
+// the default, which is how a request for 200 rounds quietly returned 20.
+func TestClampLimitReducesRatherThanResets(t *testing.T) {
+	cases := []struct {
+		name         string
+		in, def, max int64
+		want         int64
+	}{
+		{"over the maximum becomes the maximum", 200, 20, 100, 100},
+		{"exactly the maximum is kept", 100, 20, 100, 100},
+		{"within range is kept", 37, 20, 100, 37},
+		{"zero becomes the default", 0, 20, 100, 20},
+		{"negative becomes the default", -5, 20, 100, 20},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampLimit(tc.in, tc.def, tc.max); got != tc.want {
+				t.Errorf("clampLimit(%d, %d, %d) = %d, want %d", tc.in, tc.def, tc.max, got, tc.want)
+			}
+		})
 	}
 }
